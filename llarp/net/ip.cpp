@@ -69,35 +69,45 @@ namespace llarp
     huint128_t
     IPPacket::srcv6() const
     {
-      return In6ToHUInt(HeaderV6()->srcaddr);
+      if(IsV6())
+        return In6ToHUInt(HeaderV6()->srcaddr);
+
+      return ExpandV4(srcv4());
     }
 
     huint128_t
     IPPacket::dstv6() const
     {
-      return In6ToHUInt(HeaderV6()->dstaddr);
+      if(IsV6())
+        return In6ToHUInt(HeaderV6()->dstaddr);
+
+      return ExpandV4(dstv4());
     }
 
     bool
     IPPacket::Load(const llarp_buffer_t &pkt)
     {
-      if(pkt.sz > sizeof(buf))
+      if(pkt.sz > sizeof(buf) or pkt.sz == 0)
         return false;
       sz = pkt.sz;
-      memcpy(buf, pkt.base, sz);
+      std::copy_n(pkt.base, sz, buf);
       return true;
     }
 
-    llarp_buffer_t
+    ManagedBuffer
     IPPacket::ConstBuffer() const
     {
-      return {buf, sz};
+      const byte_t *ptr = buf;
+      llarp_buffer_t b(ptr, sz);
+      return ManagedBuffer(b);
     }
 
-    llarp_buffer_t
+    ManagedBuffer
     IPPacket::Buffer()
     {
-      return {buf, sz};
+      byte_t *ptr = buf;
+      llarp_buffer_t b(ptr, sz);
+      return ManagedBuffer(b);
     }
 
     huint32_t

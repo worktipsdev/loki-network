@@ -3,7 +3,6 @@
 
 #include <dht/tx.hpp>
 #include <dht/txowner.hpp>
-#include <util/logger.hpp>
 #include <util/time.hpp>
 #include <util/status.hpp>
 
@@ -14,8 +13,7 @@ namespace llarp
 {
   namespace dht
   {
-    template < typename K, typename V, typename K_Hash,
-               llarp_time_t requestTimeoutMS = 30000UL >
+    template < typename K, typename V, typename K_Hash >
     struct TXHolder
     {
       using TXPtr = std::unique_ptr< TX< K, V > >;
@@ -40,22 +38,22 @@ namespace llarp
                              {"owner", item.first.ExtractStatus()},
                              {"tx", item.second->ExtractStatus()}};
                        });
-        obj.Put("tx", txObjs);
+        obj["tx"] = txObjs;
         std::transform(
             timeouts.begin(), timeouts.end(), std::back_inserter(timeoutsObjs),
             [](const auto& item) -> util::StatusObject {
               return util::StatusObject{{"time", item.second},
-                                        {"target", item.first.ToHex()}};
+                                        {"target", item.first.ToString()}};
             });
-        obj.Put("timeouts", timeoutsObjs);
+        obj["timeouts"] = timeoutsObjs;
         std::transform(waiting.begin(), waiting.end(),
                        std::back_inserter(waitingObjs),
                        [](const auto& item) -> util::StatusObject {
                          return util::StatusObject{
-                             {"target", item.first.ToHex()},
+                             {"target", item.first.ToString()},
                              {"whoasked", item.second.ExtractStatus()}};
                        });
-        obj.Put("waiting", waitingObjs);
+        obj["waiting"] = waitingObjs;
         return obj;
       }
 
@@ -73,7 +71,7 @@ namespace llarp
 
       void
       NewTX(const TXOwner& askpeer, const TXOwner& whoasked, const K& k,
-            TX< K, V >* t);
+            TX< K, V >* t, llarp_time_t requestTimeoutMS = 15000);
 
       /// mark tx as not fond
       void
@@ -94,11 +92,9 @@ namespace llarp
       Expire(llarp_time_t now);
     };
 
-    template < typename K, typename V, typename K_Hash,
-               llarp_time_t requestTimeoutMS >
+    template < typename K, typename V, typename K_Hash >
     const TX< K, V >*
-    TXHolder< K, V, K_Hash, requestTimeoutMS >::GetPendingLookupFrom(
-        const TXOwner& owner) const
+    TXHolder< K, V, K_Hash >::GetPendingLookupFrom(const TXOwner& owner) const
     {
       auto itr = tx.find(owner);
       if(itr == tx.end())
@@ -109,12 +105,12 @@ namespace llarp
       return itr->second.get();
     }
 
-    template < typename K, typename V, typename K_Hash,
-               llarp_time_t requestTimeoutMS >
+    template < typename K, typename V, typename K_Hash >
     void
-    TXHolder< K, V, K_Hash, requestTimeoutMS >::NewTX(const TXOwner& askpeer,
-                                                      const TXOwner& whoasked,
-                                                      const K& k, TX< K, V >* t)
+    TXHolder< K, V, K_Hash >::NewTX(const TXOwner& askpeer,
+                                    const TXOwner& whoasked, const K& k,
+                                    TX< K, V >* t,
+                                    llarp_time_t requestTimeoutMS)
     {
       (void)whoasked;
       tx.emplace(askpeer, std::unique_ptr< TX< K, V > >(t));
@@ -132,30 +128,24 @@ namespace llarp
       }
     }
 
-    template < typename K, typename V, typename K_Hash,
-               llarp_time_t requestTimeoutMS >
+    template < typename K, typename V, typename K_Hash >
     void
-    TXHolder< K, V, K_Hash, requestTimeoutMS >::NotFound(
-        const TXOwner& from, const std::unique_ptr< Key_t >& next)
+    TXHolder< K, V, K_Hash >::NotFound(const TXOwner& from,
+                                       const std::unique_ptr< Key_t >& next)
     {
       auto txitr = tx.find(from);
       if(txitr == tx.end())
       {
         return;
       }
-
-      // ask for next peer
-      if(!txitr->second->AskNextPeer(from.node, next))
-        Inform(from, txitr->second->target, {}, true, true);
+      Inform(from, txitr->second->target, {}, true, true);
     }
 
-    template < typename K, typename V, typename K_Hash,
-               llarp_time_t requestTimeoutMS >
+    template < typename K, typename V, typename K_Hash >
     void
-    TXHolder< K, V, K_Hash, requestTimeoutMS >::Inform(TXOwner from, K key,
-                                                       std::vector< V > values,
-                                                       bool sendreply,
-                                                       bool removeTimeouts)
+    TXHolder< K, V, K_Hash >::Inform(TXOwner from, K key,
+                                     std::vector< V > values, bool sendreply,
+                                     bool removeTimeouts)
     {
       auto range = waiting.equal_range(key);
       auto itr   = range.first;
@@ -188,15 +178,14 @@ namespace llarp
       }
     }
 
-    template < typename K, typename V, typename K_Hash,
-               llarp_time_t requestTimeoutMS >
+    template < typename K, typename V, typename K_Hash >
     void
-    TXHolder< K, V, K_Hash, requestTimeoutMS >::Expire(llarp_time_t now)
+    TXHolder< K, V, K_Hash >::Expire(llarp_time_t now)
     {
       auto itr = timeouts.begin();
       while(itr != timeouts.end())
       {
-        if(now > itr->second && now - itr->second >= requestTimeoutMS)
+        if(now >= itr->second)
         {
           Inform(TXOwner{}, itr->first, {}, true, false);
           itr = timeouts.erase(itr);

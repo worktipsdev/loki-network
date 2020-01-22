@@ -14,7 +14,7 @@ namespace llarp
 
       PathConfirmMessage() = default;
       PathConfirmMessage(uint64_t lifetime);
-      ~PathConfirmMessage() = default;
+      ~PathConfirmMessage() override = default;
 
       bool
       BEncode(llarp_buffer_t* buf) const override;
@@ -30,6 +30,7 @@ namespace llarp
       {
         pathLifetime = 0;
         pathCreated  = 0;
+        version      = 0;
       }
     };
   }  // namespace routing

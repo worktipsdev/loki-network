@@ -25,6 +25,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <tuntap.h>
+
 #ifdef __sun
 #define BSD_COMP
 #define TUNSDEBUG _IOW('t', 90, int)
@@ -39,6 +41,7 @@
 #if defined(Linux)
 #include <linux/if_tun.h>
 #include <linux/if_ether.h>
+#include <linux/if.h>
 #else
 
 #include <net/if.h>
@@ -62,7 +65,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <tuntap.h>
 
 int
 tuntap_start(struct device *dev, int mode, int tun)
@@ -157,7 +159,7 @@ tuntap_set_ifname(struct device *dev, const char *ifname)
   }
 
   len = strlen(ifname);
-  if(len > IF_NAMESIZE)
+  if(len >= IF_NAMESIZE)
   {
     tuntap_log(TUNTAP_LOG_ERR, "Parameter 'ifname' is too long");
     return -1;
@@ -169,7 +171,7 @@ tuntap_set_ifname(struct device *dev, const char *ifname)
   }
 
   (void)memset(dev->if_name, 0, IF_NAMESIZE);
-  (void)strncpy(dev->if_name, ifname, len);
+  (void)strncpy(dev->if_name, ifname, len + 1);
   return 0;
 }
 
@@ -379,8 +381,8 @@ tuntap_set_debug(struct device *dev, int set)
     return 0;
   }
 
-#ifndef Darwin
-  if(ioctl(dev->tun_fd, TUNSDEBUG, &set) == -1)
+#if defined(__linux__)
+  if(ioctl(dev->tun_fd, TUNSETDEBUG, &set) == -1)
   {
     switch(set)
     {

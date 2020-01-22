@@ -20,7 +20,7 @@ namespace llarp
     {
     }
 
-    ~NoOpCrypto() = default;
+    ~NoOpCrypto() override = default;
 
     bool
     xchacha20(const llarp_buffer_t &, const SharedSecret &,
@@ -178,6 +178,12 @@ namespace llarp
                 const PQPubKey &) override
     {
       std::copy_n(secret.begin(), SharedSecret::SIZE, block.begin());
+      return true;
+    }
+
+    bool
+    check_identity_privkey(const SecretKey &) override
+    {
       return true;
     }
   };

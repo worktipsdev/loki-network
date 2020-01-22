@@ -1,3 +1,4 @@
+#include <chrono>
 #include <router/rc_lookup_handler.hpp>
 
 #include <link/i_link_manager.hpp>
@@ -5,14 +6,18 @@
 #include <crypto/crypto.hpp>
 #include <service/context.hpp>
 #include <router_contact.hpp>
-#include <util/memfn.hpp>
+#include <util/meta/memfn.hpp>
 #include <util/types.hpp>
-#include <util/threading.hpp>
+#include <util/thread/threading.hpp>
 #include <nodedb.hpp>
 #include <dht/context.hpp>
+#include <router/abstractrouter.hpp>
 
 #include <iterator>
 #include <functional>
+#include <random>
+
+using namespace std::chrono_literals;
 
 namespace llarp
 {
@@ -33,6 +38,8 @@ namespace llarp
   void
   RCLookupHandler::SetRouterWhitelist(const std::vector< RouterID > &routers)
   {
+    if(routers.empty())
+      return;
     util::Lock l(&_mutex);
 
     whitelistRouters.clear();
@@ -45,21 +52,30 @@ namespace llarp
             " routers");
   }
 
+  bool
+  RCLookupHandler::HaveReceivedWhitelist()
+  {
+    util::Lock l(&_mutex);
+    return not whitelistRouters.empty();
+  }
+
   void
-  RCLookupHandler::GetRC(const RouterID &router, RCRequestCallback callback)
+  RCLookupHandler::GetRC(const RouterID &router, RCRequestCallback callback,
+                         bool forceLookup)
   {
     RouterContact remoteRC;
-
-    if(_nodedb->Get(router, remoteRC))
+    if(not forceLookup)
     {
-      if(callback)
+      if(_nodedb->Get(router, remoteRC))
       {
-        callback(router, &remoteRC, RCRequestResult::Success);
+        if(callback)
+        {
+          callback(router, &remoteRC, RCRequestResult::Success);
+        }
+        FinalizeRequest(router, &remoteRC, RCRequestResult::Success);
+        return;
       }
-      FinalizeRequest(router, &remoteRC, RCRequestResult::Success);
-      return;
     }
-
     bool shouldDoLookup = false;
 
     {
@@ -100,6 +116,10 @@ namespace llarp
       {
         FinalizeRequest(router, nullptr, RCRequestResult::RouterNotFound);
       }
+      else
+      {
+        _routerLookupTimes[router] = std::chrono::steady_clock::now();
+      }
     }
   }
 
@@ -133,6 +153,7 @@ namespace llarp
 
     if(not rc.Verify(_dht->impl->Now()))
     {
+      LogWarn("RC for ", RouterID(rc.pubkey), " is invalid");
       return false;
     }
 
@@ -146,6 +167,12 @@ namespace llarp
     }
 
     return true;
+  }
+
+  size_t
+  RCLookupHandler::NumberOfStrictConnectRouters() const
+  {
+    return _strictConnectPubkeys.size();
   }
 
   bool
@@ -203,7 +230,7 @@ namespace llarp
 
     for(const auto &router : routersToLookUp)
     {
-      GetRC(router, nullptr);
+      GetRC(router, nullptr, true);
     }
 
     _nodedb->RemoveStaleRCs(_bootstrapRouterIDList,
@@ -226,6 +253,40 @@ namespace llarp
       LogError("we have no bootstrap nodes specified");
     }
 
+    if(useWhitelist)
+    {
+      static constexpr auto RerequestInterval = 10min;
+      static constexpr size_t LookupPerTick   = 5;
+
+      std::vector< RouterID > lookupRouters;
+      lookupRouters.reserve(LookupPerTick);
+
+      const auto now = std::chrono::steady_clock::now();
+
+      {
+        // if we are using a whitelist look up a few routers we don't have
+        util::Lock l(&_mutex);
+        for(const auto &r : whitelistRouters)
+        {
+          if(now > _routerLookupTimes[r] + RerequestInterval
+             and not _nodedb->Has(r))
+          {
+            lookupRouters.emplace_back(r);
+          }
+        }
+      }
+
+      if(lookupRouters.size() > LookupPerTick)
+      {
+        static std::mt19937_64 rng{std::random_device{}()};
+        std::shuffle(lookupRouters.begin(), lookupRouters.end(), rng);
+        lookupRouters.resize(LookupPerTick);
+      }
+
+      for(const auto &r : lookupRouters)
+        GetRC(r, nullptr, true);
+      return;
+    }
     // TODO: only explore via random subset
     // explore via every connected peer
     _linkManager->ForEachPeer([&](ILinkSession *s) {

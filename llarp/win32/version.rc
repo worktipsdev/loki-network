@@ -7,19 +7,17 @@
 // Microsoft Visual C++ generated resource script.
 //
 #include "resource.h"
+#include <constants/version.h>
+#ifdef __GNUC__ // make windows rc accept this
 #include <winresrc.h>
+#endif
 /////////////////////////////////////////////////////////////////////////////
 // English (United States) resources
 
 #define STRINGIZER(version) #version
 
-#ifdef LLARP_RELEASE_MOTTO
 #define VERSION_STRING(version, codename, revision) \
   STRINGIZER(version) "-release [" STRINGIZER(codename) "] (rev-" STRINGIZER(revision) ")"
-#else
-#define VERSION_STRING(version, revision) \
-  STRINGIZER(version) STRINGIZER(revision)
-#endif
 
 #if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
 #ifdef _WIN32
@@ -58,8 +56,8 @@ END
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,4,0,0
- PRODUCTVERSION 0,4,0,0
+ FILEVERSION LLARP_VERSION
+ PRODUCTVERSION LLARP_VERSION
  FILEFLAGSMASK 0x17L
 #ifdef _DEBUG
  FILEFLAGS 0x3L
@@ -76,21 +74,13 @@ BEGIN
         BEGIN
             VALUE "Comments", "includes relay/exit functionality, such code is highly experimental on non-Linux targets"
             VALUE "CompanyName", "Loki Foundation"
-            VALUE "FileDescription", "LokiNET daemon for Microsoftï¿½ Windowsï¿½ NTï¿½"
-#ifdef LLARP_RELEASE_MOTTO
-            VALUE "FileVersion", VERSION_STRING(0.4.0, RELEASE_MOTTO, GIT_REV)
-#else
-            VALUE "FileVersion", VERSION_STRING(0.4.0-dev-, GIT_REV)
-#endif
+            VALUE "FileDescription", "LokiNET daemon for Microsoft® Windows® NT™"
+            VALUE "FileVersion", VERSION_STRING(LLARP_VERSION_TRIPLET, LLARP_RELEASE_MOTTO, VERSIONTAG)
             VALUE "InternalName", "llarpd"
-            VALUE "LegalCopyright", "Copyright ï¿½2018-2019 Jeff Becker, Rick V for the Loki Foundation. All rights reserved. This software is provided under the terms of the zlib-libpng licence; see the file LICENSE for details."
+            VALUE "LegalCopyright", "Copyright ©2018-2020 Jeff Becker, Rick V for the Loki Foundation. All rights reserved. This software is provided under the terms of the zlib-libpng licence; see the file LICENSE for details."
             VALUE "OriginalFilename", "llarpd.exe"
             VALUE "ProductName", "LokiNET for Windows"
-#ifdef LLARP_RELEASE_MOTTO
-            VALUE "ProductVersion", VERSION_STRING(0.4.0, RELEASE_MOTTO, GIT_REV)
-#else
-            VALUE "ProductVersion", VERSION_STRING(0.4.0-dev-, GIT_REV)
-#endif
+            VALUE "ProductVersion", VERSION_STRING(LLARP_VERSION_TRIPLET, LLARP_RELEASE_MOTTO, VERSIONTAG)
         END
     END
     BLOCK "VarFileInfo"
@@ -105,7 +95,8 @@ END
 // RT_MANIFEST
 //
 
-3                       RT_MANIFEST             "app.xml"
+// Uncomment if your toolchain does not provide a default-manifest.o
+//3                       RT_MANIFEST             "app.xml"
 
 #endif    // English (United States) resources
 /////////////////////////////////////////////////////////////////////////////

@@ -1,8 +1,11 @@
 #ifndef LLARP_DHT_MESSAGES_GOT_ROUTER_HPP
 #define LLARP_DHT_MESSAGES_GOT_ROUTER_HPP
+
 #include <dht/message.hpp>
 #include <router_contact.hpp>
 #include <util/copy_or_nullptr.hpp>
+#include <utility>
+#include <vector>
 
 namespace llarp
 {
@@ -27,9 +30,9 @@ namespace llarp
       {
       }
 
-      GotRouterMessage(uint64_t id, const std::vector< RouterID >& near,
+      GotRouterMessage(uint64_t id, std::vector< RouterID > _near,
                        bool tunneled)
-          : IMessage({}), N(near), txid(id), relayed(tunneled)
+          : IMessage({}), N(std::move(_near)), txid(id), relayed(tunneled)
       {
       }
 
@@ -44,7 +47,7 @@ namespace llarp
         version = other.version;
       }
 
-      ~GotRouterMessage();
+      ~GotRouterMessage() override;
 
       bool
       BEncode(llarp_buffer_t* buf) const override;
@@ -52,7 +55,7 @@ namespace llarp
       bool
       DecodeKey(const llarp_buffer_t& key, llarp_buffer_t* val) override;
 
-      virtual bool
+      bool
       HandleMessage(
           llarp_dht_context* ctx,
           std::vector< std::unique_ptr< IMessage > >& replies) const override;

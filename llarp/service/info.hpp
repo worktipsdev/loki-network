@@ -17,10 +17,10 @@ namespace llarp
      private:
       PubKey enckey;
       PubKey signkey;
+      mutable Address m_CachedAddr;
 
      public:
       VanityNonce vanity;
-      Address m_CachedAddr;
       uint64_t version = LLARP_PROTO_VERSION;
 
       using OptNonce = absl::optional< VanityNonce >;
@@ -37,6 +37,10 @@ namespace llarp
       const PubKey&
       EncryptionPublicKey() const
       {
+        if(m_CachedAddr.IsZero())
+        {
+          CalculateAddress(m_CachedAddr.as_array());
+        }
         return enckey;
       }
 
@@ -66,18 +70,6 @@ namespace llarp
         return !(*this == other);
       }
 
-      ServiceInfo&
-      operator=(const ServiceInfo& other)
-      {
-        enckey  = other.enckey;
-        signkey = other.signkey;
-        version = other.version;
-        vanity  = other.vanity;
-        version = other.version;
-        UpdateAddr();
-        return *this;
-      }
-
       bool
       operator<(const ServiceInfo& other) const
       {
@@ -97,6 +89,10 @@ namespace llarp
       const Address&
       Addr() const
       {
+        if(m_CachedAddr.IsZero())
+        {
+          CalculateAddress(m_CachedAddr.as_array());
+        }
         return m_CachedAddr;
       }
 
@@ -106,9 +102,9 @@ namespace llarp
       bool
       BDecode(llarp_buffer_t* buf)
       {
-        if(bencode_decode_dict(*this, buf))
-          return CalculateAddress(m_CachedAddr.as_array());
-        return false;
+        if(not bencode_decode_dict(*this, buf))
+          return false;
+        return UpdateAddr();
       }
 
       bool

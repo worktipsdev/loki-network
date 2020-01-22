@@ -1,10 +1,11 @@
 #ifndef LLARP_EV_HPP
 #define LLARP_EV_HPP
 
+#include <net/net_addr.hpp>
 #include <ev/ev.h>
 #include <util/buffer.hpp>
 #include <util/codel.hpp>
-#include <util/threading.hpp>
+#include <util/thread/threading.hpp>
 
 // writev
 #ifndef _WIN32
@@ -16,10 +17,9 @@
 #include <deque>
 #include <list>
 #include <future>
+#include <utility>
 
 #ifdef _WIN32
-#include <win32/win32_up.h>
-#include <win32/win32_upoll.h>
 // From the preview SDK, should take a look at that
 // periodically in case its definition changes
 #define UNIX_PATH_MAX 108
@@ -39,6 +39,8 @@ typedef struct sockaddr_un
 #include <sys/un.h>
 #endif
 
+struct llarp_ev_pkt_pipe;
+
 #ifndef MAX_WRITE_QUEUE_SIZE
 #define MAX_WRITE_QUEUE_SIZE (1024UL)
 #endif
@@ -47,7 +49,7 @@ typedef struct sockaddr_un
 #define EV_READ_BUF_SZ (4 * 1024UL)
 #endif
 #ifndef EV_WRITE_BUF_SZ
-#define EV_WRITE_BUF_SZ (2 * 1024UL)
+#define EV_WRITE_BUF_SZ (4 * 1024UL)
 #endif
 
 /// do io and reset errno after
@@ -180,7 +182,7 @@ namespace llarp
     virtual ssize_t
     do_write(void* data, size_t sz)
     {
-      return uwrite(fd, (char*)data, sz);
+      return send(fd, (char*)data, sz, 0);
     }
 
     bool
@@ -268,7 +270,7 @@ namespace llarp
 
     virtual ~win32_ev_io()
     {
-      uclose(fd);
+      closesocket(fd);
     };
   };
 #else
@@ -305,7 +307,7 @@ namespace llarp
       struct GetNow
       {
         llarp_ev_loop_ptr loop;
-        GetNow(llarp_ev_loop_ptr l) : loop(l)
+        GetNow(llarp_ev_loop_ptr l) : loop(std::move(l))
         {
         }
 
@@ -319,7 +321,7 @@ namespace llarp
       struct PutTime
       {
         llarp_ev_loop_ptr loop;
-        PutTime(llarp_ev_loop_ptr l) : loop(l)
+        PutTime(llarp_ev_loop_ptr l) : loop(std::move(l))
         {
         }
         void
@@ -538,8 +540,8 @@ namespace llarp
     }
 
     /// inbound
-    tcp_conn(llarp_ev_loop* loop, int fd)
-        : ev_io(fd, new LosslessWriteQueue_t{}), _conn(nullptr)
+    tcp_conn(llarp_ev_loop* loop, int _fd)
+        : ev_io(_fd, new LosslessWriteQueue_t{}), _conn(nullptr)
     {
       tcp.impl   = this;
       tcp.loop   = loop;
@@ -551,9 +553,9 @@ namespace llarp
     }
 
     /// outbound
-    tcp_conn(llarp_ev_loop* loop, int fd, const sockaddr* addr,
+    tcp_conn(llarp_ev_loop* loop, int _fd, const sockaddr* addr,
              llarp_tcp_connecter* conn)
-        : ev_io(fd, new LosslessWriteQueue_t{}), _conn(conn)
+        : ev_io(_fd, new LosslessWriteQueue_t{}), _conn(conn)
     {
       socklen_t slen = sizeof(sockaddr_in);
       if(addr->sa_family == AF_INET6)
@@ -570,9 +572,7 @@ namespace llarp
       tcp.close  = &DoClose;
     }
 
-    virtual ~tcp_conn()
-    {
-    }
+    ~tcp_conn() override = default;
 
     /// start connecting
     void
@@ -631,10 +631,10 @@ namespace llarp
       errno = 0;
     }
 
-    virtual ssize_t
+    ssize_t
     do_write(void* buf, size_t sz) override;
 
-    virtual int
+    int
     read(byte_t* buf, size_t sz) override;
 
     bool
@@ -645,14 +645,14 @@ namespace llarp
   {
     llarp_ev_loop* loop;
     llarp_tcp_acceptor* tcp;
-    tcp_serv(llarp_ev_loop* l, int fd, llarp_tcp_acceptor* t)
-        : ev_io(fd), loop(l), tcp(t)
+    tcp_serv(llarp_ev_loop* l, int _fd, llarp_tcp_acceptor* t)
+        : ev_io(_fd), loop(l), tcp(t)
     {
       tcp->impl = this;
     }
 
     bool
-    tick()
+    tick() override
     {
       if(tcp->tick)
         tcp->tick(tcp);
@@ -660,8 +660,8 @@ namespace llarp
     }
 
     /// actually does accept() :^)
-    virtual int
-    read(byte_t*, size_t);
+    int
+    read(byte_t*, size_t) override;
   };
 
 }  // namespace llarp
@@ -710,7 +710,6 @@ struct llarp_fd_promise
 struct llarp_ev_loop
 {
   byte_t readbuf[EV_READ_BUF_SZ] = {0};
-  llarp_time_t _now              = 0;
 
   virtual bool
   init() = 0;
@@ -724,13 +723,12 @@ struct llarp_ev_loop
   virtual void
   update_time()
   {
-    _now = llarp::time_now_ms();
   }
 
   virtual llarp_time_t
   time_now() const
   {
-    return _now;
+    return llarp::time_now_ms();
   }
 
   virtual void
@@ -742,6 +740,16 @@ struct llarp_ev_loop
 
   virtual int
   tick(int ms) = 0;
+
+  virtual uint32_t
+  call_after_delay(llarp_time_t delay_ms,
+                   std::function< void(void) > callback) = 0;
+
+  virtual void
+  cancel_delayed_call(uint32_t call_id) = 0;
+
+  virtual bool
+  add_ticker(std::function< void(void) > ticker) = 0;
 
   virtual void
   stop() = 0;
@@ -773,6 +781,15 @@ struct llarp_ev_loop
   virtual llarp::ev_io*
   bind_tcp(llarp_tcp_acceptor* tcp, const sockaddr* addr) = 0;
 
+  virtual bool
+  add_pipe(llarp_ev_pkt_pipe*)
+  {
+    return false;
+  }
+
+  /// give this event loop a logic thread for calling
+  virtual void set_logic(std::shared_ptr< llarp::Logic >) = 0;
+
   /// register event listener
   virtual bool
   add_ev(llarp::ev_io* ev, bool write) = 0;
@@ -784,13 +801,11 @@ struct llarp_ev_loop
     return conn && add_ev(conn, true);
   }
 
-  virtual ~llarp_ev_loop()
-  {
-  }
+  virtual ~llarp_ev_loop() = default;
 
   std::list< std::unique_ptr< llarp::ev_io > > handlers;
 
-  void
+  virtual void
   tick_listeners()
   {
     auto itr = handlers.begin();
@@ -805,6 +820,77 @@ struct llarp_ev_loop
       }
     }
   }
+
+  virtual void
+  call_soon(std::function< void(void) > f) = 0;
+};
+
+struct PacketBuffer
+{
+  PacketBuffer(PacketBuffer&& other)
+  {
+    _ptr       = other._ptr;
+    _sz        = other._sz;
+    other._ptr = nullptr;
+    other._sz  = 0;
+  }
+
+  PacketBuffer(const PacketBuffer&) = delete;
+
+  PacketBuffer&
+  operator=(const PacketBuffer&) = delete;
+
+  PacketBuffer() : PacketBuffer(nullptr, 0){};
+  explicit PacketBuffer(size_t sz) : _sz{sz}
+  {
+    _ptr = new char[sz];
+  }
+  PacketBuffer(char* buf, size_t sz)
+  {
+    _ptr = buf;
+    _sz  = sz;
+  }
+  ~PacketBuffer()
+  {
+    if(_ptr)
+      delete[] _ptr;
+  }
+  byte_t*
+  data()
+  {
+    return (byte_t*)_ptr;
+  }
+  size_t
+  size()
+  {
+    return _sz;
+  }
+  byte_t& operator[](size_t sz)
+  {
+    return data()[sz];
+  }
+  void
+  reserve(size_t sz)
+  {
+    if(_ptr)
+      delete[] _ptr;
+    _ptr = new char[sz];
+    _sz  = sz;
+  }
+
+ private:
+  char* _ptr = nullptr;
+  size_t _sz = 0;
+};
+
+struct PacketEvent
+{
+  llarp::Addr remote;
+  PacketBuffer pkt;
+};
+
+struct llarp_pkt_list : public std::vector< PacketEvent >
+{
 };
 
 #endif

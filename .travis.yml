@@ -3,60 +3,138 @@ language: cpp
 cache: ccache
 
 matrix:
+  fast_finish: true
   include:
-  - os: linux
+  - name: "lint check"
+    os: linux
+    dist: xenial
+    compiler: gcc
+    env: MAKE_TARGET=format-verify PATH="/usr/lib/llvm-8/bin:$PATH"
+    addons:
+      apt:
+        sources:
+          - llvm-toolchain-xenial-8
+        packages:
+          - clang-format-8
+  - name: "make debug (linux/gcc)"
+    os: linux
     dist: xenial
     compiler: gcc
     env: BUILD_TYPE=Debug IS_NOTIFICATION=1
-  - os: linux
+  - name: "make release (linux/gcc)"
+    os: linux
+    dist: xenial
+    compiler: gcc
+    env: BUILD_TYPE=Release
+  - name: "make debug (linux/clang)"
+    os: linux
+    dist: xenial
+    compiler: clang
+    env: BUILD_TYPE=Debug
+  - name: "make release (linux/clang)"
+    os: linux
+    dist: xenial
+    compiler: clang
+    env: BUILD_TYPE=Release
+  - name: "make debug (macOS/clang)"
+    os: osx
+    osx_image: xcode10.2
+    env: BUILD_TYPE=Debug PATH="/usr/local/opt/ccache/libexec:$PATH"
+  - name: "make release (macOS/clang)"
+    os: osx
+    osx_image: xcode10.2
+    env: BUILD_TYPE=Release PATH="/usr/local/opt/ccache/libexec:$PATH"
+#  - name: "make iOS"
+#    os: osx
+#    osx_image: xcode10.2
+#    env: MAKE_TARGET=ios PATH="/usr/local/opt/ccache/libexec:$PATH"
+#  - name: "make windows (macOS)"
+#    os: osx
+#    osx_image: xcode10.2
+#    env: MAKE_TARGET=windows PATH="/usr/local/opt/ccache/libexec:$PATH"
+#  - name: "make windows-release (macOS)"
+#    os: osx
+#    osx_image: xcode10.2
+#    env: MAKE_TARGET=windows-release PATH="/usr/local/opt/ccache/libexec:$PATH"
+#  - name: "make release (macOS beta/clang)"
+#    os: osx
+#    osx_image: xcode11
+#    env: BUILD_TYPE=Release PATH="/usr/local/opt/ccache/libexec:$PATH"
+#  - name: "address sanitizer"
+#    os: osx
+#    osx_image: xcode10.2
+#    env: BUILD_TYPE=Debug XSAN=address PATH="/usr/local/opt/ccache/libexec:$PATH" CC=/usr/local/opt/llvm/bin/clang CXX=/usr/local/opt/llvm/bin/clang++
+#  - name: "thread sanitizer"
+#    os: osx
+#    osx_image: xcode10.2
+#    env: BUILD_TYPE=Debug XSAN=thread PATH="/usr/local/opt/ccache/libexec:$PATH" CC=/usr/local/opt/llvm/bin/clang CXX=/usr/local/opt/llvm/bin/clang++
+#  - name: "undefined sanitizer"
+#    os: osx
+#    osx_image: xcode10.2
+#    env: BUILD_TYPE=Debug XSAN=undefined PATH="/usr/local/opt/ccache/libexec:$PATH" CC=/usr/local/opt/llvm/bin/clang CXX=/usr/local/opt/llvm/bin/clang++
+  - name: "memory sanitizer"
+    os: linux
+    dist: xenial
+    compiler: clang
+    env: BUILD_TYPE=Debug XSAN=memory
+  - name: "router docker image"
+    os: linux
+    dist: xenial
+    env: DOCKER_FILE=docker/router.Dockerfile
+    services: docker
+  - name: "make windows docker image"
+    os: linux
+    dist: xenial
+    env: DOCKER_FILE=docker/alpine-windows.Dockerfile
+    services: docker
+  - name: "gcc trunk"
+    os: linux
+    dist: xenial
+    env: DOCKER_FILE=docker/gcc-trunk.Dockerfile
+    services: docker
+  - name: "native windows debug"
+    os: windows
+    env: BUILD_TYPE=Debug
+  - name: "native windows release"
+    os: windows
+    env: BUILD_TYPE=Release
+  allow_failures:
+  - name: "make windows docker image"
+    os: linux
+    dist: xenial
+    env: DOCKER_FILE=docker/alpine-windows.Dockerfile
+    services: docker
+  - name: "native windows debug"
+    os: windows
+    env: BUILD_TYPE=Debug
+  - name: "native windows release"
+    os: windows
+    env: BUILD_TYPE=Release
+#  - name: "native windows debug"
+#    os: windows
+#    env: BUILD_TYPE=Debug
+#  - name: "native windows release"
+#    os: windows
+#    env: BUILD_TYPE=Release
+#  - os: linux
+#    dist: xenial
+#    env: DOCKER_FILE=docker/alpine-windows.Dockerfile
+#    services: docker
+  - name: "router docker image"
+    os: linux
     dist: xenial
     env: DOCKER_FILE=docker/router.Dockerfile
     services: docker
   - os: linux
     dist: xenial
-    env: DOCKER_FILE=docker/alpine-windows.Dockerfile
+    env: DOCKER_FILE=docker/gcc-trunk.Dockerfile
     services: docker
-  - os: linux
-    dist: xenial
-    compiler: gcc
-    env: BUILD_TYPE=Release
-  - os: linux
-    dist: xenial
-    compiler: clang
-    env: BUILD_TYPE=Debug
-  - os: linux
-    dist: xenial
-    compiler: clang
-    env: BUILD_TYPE=Release
-  - os: osx
-    osx_image: xcode10.2
-    compiler: gcc
-    env: BUILD_TYPE=Debug
-  - os: osx
-    osx_image: xcode10.2
-    compiler: gcc
-    env: BUILD_TYPE=Release
-  - os: osx
-    osx_image: xcode10.2
-    env: BUILD_TYPE=Debug PATH="/usr/local/opt/ccache/libexec:$PATH"
-  - os: osx
-    osx_image: xcode10.2
-    env: BUILD_TYPE=Release PATH="/usr/local/opt/ccache/libexec:$PATH"
-  - os: osx
-    osx_image: xcode11
-    env: BUILD_TYPE=Release PATH="/usr/local/opt/ccache/libexec:$PATH"
-  - os: osx
-    osx_image: xcode10.2
-    env: BUILD_TYPE=Debug ASAN=ON PATH="/usr/local/opt/ccache/libexec:$PATH" CC=/usr/local/opt/llvm/bin/clang CXX=/usr/local/opt/llvm/bin/clang++
-  - os: windows
-    env: BUILD_TYPE=Debug
-  - os: windows
-    env: BUILD_TYPE=Release
-  allow_failures:
-  - os: linux
-    dist: xenial
-    env: DOCKER_FILE=docker/alpine-windows.Dockerfile
-    services: docker
+#  - os: osx
+#    osx_image: xcode10.2
+#    env: MAKE_TARGET=windows PATH="/usr/local/opt/ccache/libexec:$PATH"
+#  - os: osx
+#    osx_image: xcode10.2
+#    env: MAKE_TARGET=windows-release PATH="/usr/local/opt/ccache/libexec:$PATH"
 
 env:
   global:
@@ -68,6 +146,7 @@ addons:
     packages:
     - binutils-gold
     - build-essential
+    - clang-format
     - cmake
     - curl
     - docker-ce
@@ -76,21 +155,26 @@ addons:
     - gcc-mingw-w64-base
     - git
     - libcap-dev
+    - libcurl4-openssl-dev
     - libuv1-dev
     - mingw-w64 mingw-w64-common
     - ninja-build
+    - libsodium-dev
   homebrew:
     packages:
     - ccache
     - cmake
+    - curl
     - libuv
     - llvm
-    - ninja
     - make
+    - mingw-w64
+    - ninja
+    - libsodium
 
 before_install:
   - if [ "$TRAVIS_OS_NAME" == "windows" ]; then
-      choco install make ninja;
+      choco install curl make ninja;
       choco upgrade cmake.install;
       export CC="/c/Program Files/LLVM/bin/clang-cl";
       export CXX="/c/Program Files/LLVM/bin/clang-cl";
@@ -102,24 +186,16 @@ script:
     elif [[ ! -z $DOCKER_FILE ]]; then
       travis_wait docker build -f $DOCKER_FILE .;
     else
-      travis_wait make ${MAKE_TARGET:-test};
+      travis_wait make DOWNLOAD_SODIUM=ON ${MAKE_TARGET:-test};
     fi
 
 after_script:
   - echo $TRAVIS_COMMIT_RANGE
   - echo $TRAVIS_COMMIT_LOG
 
-after_success:
-  - wget https://raw.githubusercontent.com/DiscordHooks/travis-ci-discord-webhook/master/send.sh
-  - chmod +x send.sh
-  - if [[ -z $IS_NOTIFICATION ]]; then ./send.sh success $WEBHOOK_URL; fi
-
-after_failure:
-  - wget https://raw.githubusercontent.com/DiscordHooks/travis-ci-discord-webhook/master/send.sh
-  - chmod +x send.sh
-  - if [[ ! -z $IS_NOTIFICATION ]]; then ./send.sh failure $WEBHOOK_URL; fi
-
 notifications:
+  webhooks:
+    urls: $WEBHOOK_URL
   irc:
     on_success: change
     on_failure: change

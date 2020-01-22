@@ -18,16 +18,12 @@ namespace llarp
 {
   Addr::Addr()
   {
+    llarp::Zero(&_addr4, sizeof(_addr4));
+    _addr4.sin_family = AF_INET;
+    llarp::Zero(&_addr, sizeof(_addr));
+    _addr.sin6_family = AF_INET6;
   }
-  Addr::~Addr()
-  {
-  }
-
-  Addr::Addr(const Addr& other)
-  {
-    memcpy(&_addr, &other._addr, sizeof(sockaddr_in6));
-    memcpy(&_addr4, &other._addr4, sizeof(sockaddr_in));
-  }
+  Addr::~Addr() = default;
 
   void
   Addr::port(uint16_t port)
@@ -63,18 +59,18 @@ namespace llarp
     return (const in_addr*)&_addr.sin6_addr.s6_addr[12];
   }
 
-  Addr::Addr(string_view str)
+  Addr::Addr(string_view str) : Addr()
   {
     this->from_char_array(str);
   }
 
-  Addr::Addr(string_view str, const uint16_t p_port)
+  Addr::Addr(string_view str, const uint16_t p_port) : Addr()
   {
     this->from_char_array(str);
     this->port(p_port);
   }
 
-  Addr::Addr(string_view addr_str, string_view port_str)
+  Addr::Addr(string_view addr_str, string_view port_str) : Addr()
   {
     this->from_char_array(string_view_string(addr_str).c_str());
     this->port(std::strtoul(string_view_string(port_str).c_str(), nullptr, 10));
@@ -83,7 +79,6 @@ namespace llarp
   bool
   Addr::from_char_array(string_view in)
   {
-    auto str       = in.begin();
     auto pPosition = in.find(':');
     if(pPosition != string_view::npos)
     {
@@ -94,7 +89,7 @@ namespace llarp
       this->port(port);
     }
     Zero(&_addr, sizeof(sockaddr_in6));
-    struct addrinfo hint, *res = NULL;
+    struct addrinfo hint, *res = nullptr;
     int ret;
 
     memset(&hint, '\0', sizeof hint);
@@ -105,11 +100,11 @@ namespace llarp
     if(pPosition != string_view::npos)
     {
       ret = getaddrinfo(std::string(in.begin(), in.begin() + pPosition).c_str(),
-                        NULL, &hint, &res);
+                        nullptr, &hint, &res);
     }
     else
     {
-      ret = getaddrinfo(std::string(in).c_str(), NULL, &hint, &res);
+      ret = getaddrinfo(std::string(in).c_str(), nullptr, &hint, &res);
     }
 
     if(ret)
@@ -159,7 +154,7 @@ namespace llarp
   {
     Zero(&_addr, sizeof(sockaddr_in6));
     struct in_addr* addr = &_addr4.sin_addr;
-    unsigned char* ip    = (unsigned char*)&(addr->s_addr);
+    auto* ip             = (unsigned char*)&(addr->s_addr);
 
     _addr.sin6_family = AF_INET;  // set ipv4 mode
     _addr4.sin_family = AF_INET;
@@ -185,18 +180,20 @@ namespace llarp
 
   Addr::Addr(const uint8_t one, const uint8_t two, const uint8_t three,
              const uint8_t four)
+      : Addr()
   {
     this->from_4int(one, two, three, four);
   }
 
   Addr::Addr(const uint8_t one, const uint8_t two, const uint8_t three,
              const uint8_t four, const uint16_t p_port)
+      : Addr()
   {
     this->from_4int(one, two, three, four);
     this->port(p_port);
   }
 
-  Addr::Addr(const AddressInfo& other)
+  Addr::Addr(const AddressInfo& other) : Addr()
   {
     memcpy(addr6(), other.ip.s6_addr, 16);
     _addr.sin6_port = htons(other.port);
@@ -211,7 +208,7 @@ namespace llarp
       _addr.sin6_family = AF_INET6;
   }
 
-  Addr::Addr(const sockaddr_in& other)
+  Addr::Addr(const sockaddr_in& other) : Addr()
   {
     Zero(&_addr, sizeof(sockaddr_in6));
     _addr.sin6_family = AF_INET;
@@ -228,7 +225,7 @@ namespace llarp
     memcpy(&_addr4.sin_addr.s_addr, addr4(), sizeof(in_addr));
   }
 
-  Addr::Addr(const sockaddr_in6& other)
+  Addr::Addr(const sockaddr_in6& other) : Addr()
   {
     memcpy(addr6(), other.sin6_addr.s6_addr, 16);
     _addr.sin6_port = htons(other.sin6_port);
@@ -247,7 +244,7 @@ namespace llarp
       _addr.sin6_family = AF_INET6;
   }
 
-  Addr::Addr(const sockaddr& other)
+  Addr::Addr(const sockaddr& other) : Addr()
   {
     Zero(&_addr, sizeof(sockaddr_in6));
     _addr.sin6_family = other.sa_family;
@@ -318,11 +315,11 @@ namespace llarp
     {
       case AF_INET:
       {
-        sockaddr_in* ipv4_dst = (sockaddr_in*)other;
-        dst                   = (void*)&ipv4_dst->sin_addr.s_addr;
-        src                   = (void*)&_addr4.sin_addr.s_addr;
-        ptr                   = &((sockaddr_in*)other)->sin_port;
-        slen                  = sizeof(in_addr);
+        auto* ipv4_dst = (sockaddr_in*)other;
+        dst            = (void*)&ipv4_dst->sin_addr.s_addr;
+        src            = (void*)&_addr4.sin_addr.s_addr;
+        ptr            = &((sockaddr_in*)other)->sin_port;
+        slen           = sizeof(in_addr);
         break;
       }
       case AF_INET6:

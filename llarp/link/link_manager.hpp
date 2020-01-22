@@ -4,7 +4,7 @@
 #include <link/i_link_manager.hpp>
 
 #include <util/compare_ptr.hpp>
-#include <util/threading.hpp>
+#include <util/thread/threading.hpp>
 #include <link/server.hpp>
 
 #include <unordered_map>
@@ -18,7 +18,7 @@ namespace llarp
   struct LinkManager final : public ILinkManager
   {
    public:
-    ~LinkManager() = default;
+    ~LinkManager() override = default;
 
     LinkLayer_ptr
     GetCompatibleLink(const RouterContact &rc) const override;
@@ -40,7 +40,8 @@ namespace llarp
     AddLink(LinkLayer_ptr link, bool inbound = false) override;
 
     bool
-    StartLinks(Logic_ptr logic) override;
+    StartLinks(Logic_ptr logic,
+               std::shared_ptr< thread::ThreadPool > worker) override;
 
     void
     Stop() override;
@@ -65,13 +66,16 @@ namespace llarp
     size_t
     NumberOfConnectedClients() const override;
 
+    size_t
+    NumberOfPendingConnections() const override;
+
     bool
     GetRandomConnectedRouter(RouterContact &router) const override;
 
     void
     CheckPersistingSessions(llarp_time_t now) override;
 
-    virtual util::StatusObject
+    util::StatusObject
     ExtractStatus() const override;
 
     void

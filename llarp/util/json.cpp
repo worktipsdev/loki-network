@@ -21,18 +21,20 @@ namespace llarp
       size_t m_Offset;
 
       bool
-      FeedData(const char* buf, size_t sz)
+      FeedData(const char* buf, size_t sz) override
       {
+        if(sz == 0)
+          return true;
         if(m_Offset + sz > m_Buf.size() - 1)
           return false;
-        std::copy(buf, buf + sz, m_Buf.begin());
+        std::copy_n(buf, sz, m_Buf.data() + m_Offset);
         m_Offset += sz;
         m_Buf[m_Offset] = 0;
         return true;
       }
 
       Result
-      Parse(nlohmann::json& obj) const
+      Parse(nlohmann::json& obj) const override
       {
         if(m_Offset < m_Buf.size() - 1)
           return eNeedData;

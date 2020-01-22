@@ -3,9 +3,9 @@
 
 #include <util/bencode.h>
 #include <util/encode.hpp>
-#include <util/logger.hpp>
+#include <util/logging/logger.hpp>
+#include <util/meta/traits.hpp>
 #include <util/printer.hpp>
-#include <util/traits.hpp>
 
 #include <array>
 #include <cstddef>
@@ -20,47 +20,49 @@ extern "C"
 {
   extern void
   randombytes(unsigned char* const ptr, unsigned long long sz);
+
+  extern int
+  sodium_is_zero(const unsigned char* n, const size_t nlen);
 }
 namespace llarp
 {
   /// aligned buffer that is sz bytes long and aligns to the nearest Alignment
   template < size_t sz >
-  struct AlignedBuffer
+#ifdef _WIN32
+  // We CANNOT align on a 128-bit boundary, malloc(3C) on win32
+  // only hands out 64-bit aligned pointers
+  struct alignas(uint64_t) AlignedBuffer
+#else
+  struct alignas(std::max_align_t) AlignedBuffer
+#endif
   {
+    static_assert(sz >= 8,
+                  "AlignedBuffer cannot be used with buffers smaller than 8 "
+                  "bytes");
+
     static constexpr size_t SIZE = sz;
 
     using Data = std::array< byte_t, SIZE >;
 
     AlignedBuffer()
     {
-      new(&val) Data;
       Zero();
     }
 
     explicit AlignedBuffer(const byte_t* data)
     {
-      new(&val) Data;
-      auto& b = as_array();
-      for(size_t idx = 0; idx < sz; ++idx)
-      {
-        b[idx] = data[idx];
-      }
+      *this = data;
     }
 
     explicit AlignedBuffer(const Data& buf)
     {
-      new(&val) Data;
-      std::copy(buf.begin(), buf.end(), begin());
+      m_data = buf;
     }
 
     AlignedBuffer&
     operator=(const byte_t* data)
     {
-      auto& b = as_array();
-      for(size_t idx = 0; idx < sz; ++idx)
-      {
-        b[idx] = data[idx];
-      }
+      std::memcpy(m_data.data(), data, sz);
       return *this;
     }
 
@@ -84,37 +86,37 @@ namespace llarp
     bool
     operator==(const AlignedBuffer& other) const
     {
-      return as_array() == other.as_array();
+      return m_data == other.m_data;
     }
 
     bool
     operator!=(const AlignedBuffer& other) const
     {
-      return as_array() != other.as_array();
+      return m_data != other.m_data;
     }
 
     bool
     operator<(const AlignedBuffer& other) const
     {
-      return as_array() < other.as_array();
+      return m_data < other.m_data;
     }
 
     bool
     operator>(const AlignedBuffer& other) const
     {
-      return as_array() > other.as_array();
+      return m_data > other.m_data;
     }
 
     bool
     operator<=(const AlignedBuffer& other) const
     {
-      return as_array() <= other.as_array();
+      return m_data <= other.m_data;
     }
 
     bool
     operator>=(const AlignedBuffer& other) const
     {
-      return as_array() >= other.as_array();
+      return m_data >= other.m_data;
     }
 
     AlignedBuffer
@@ -130,9 +132,9 @@ namespace llarp
     operator^=(const AlignedBuffer& other)
     {
       // Mutate in place instead.
-      for(size_t i = 0; i < as_array().size(); ++i)
+      for(size_t i = 0; i < sz; ++i)
       {
-        as_array()[i] ^= other.as_array()[i];
+        m_data[i] ^= other.m_data[i];
       }
       return *this;
     }
@@ -140,13 +142,13 @@ namespace llarp
     byte_t& operator[](size_t idx)
     {
       assert(idx < SIZE);
-      return as_array()[idx];
+      return m_data[idx];
     }
 
     const byte_t& operator[](size_t idx) const
     {
       assert(idx < SIZE);
-      return as_array()[idx];
+      return m_data[idx];
     }
 
     static constexpr size_t
@@ -158,45 +160,43 @@ namespace llarp
     void
     Fill(byte_t f)
     {
-      as_array().fill(f);
+      m_data.fill(f);
     }
 
     Data&
     as_array()
     {
-      return reinterpret_cast< Data& >(val);
+      return m_data;
     }
 
     const Data&
     as_array() const
     {
-      return reinterpret_cast< const Data& >(val);
+      return m_data;
     }
 
     byte_t*
     data()
     {
-      return as_array().data();
+      return m_data.data();
     }
 
     const byte_t*
     data() const
     {
-      return as_array().data();
+      return m_data.data();
     }
 
     bool
     IsZero() const
     {
-      auto notZero = [](byte_t b) { return b != 0; };
-
-      return std::find_if(begin(), end(), notZero) == end();
+      return sodium_is_zero(data(), size());
     }
 
     void
     Zero()
     {
-      as_array().fill(0);
+      m_data.fill(0);
     }
 
     void
@@ -208,25 +208,25 @@ namespace llarp
     typename Data::iterator
     begin()
     {
-      return as_array().begin();
+      return m_data.begin();
     }
 
     typename Data::iterator
     end()
     {
-      return as_array().end();
+      return m_data.end();
     }
 
     typename Data::const_iterator
     begin() const
     {
-      return as_array().cbegin();
+      return m_data.cbegin();
     }
 
     typename Data::const_iterator
     end() const
     {
-      return as_array().cend();
+      return m_data.cend();
     }
 
     bool
@@ -273,16 +273,14 @@ namespace llarp
       size_t
       operator()(const AlignedBuffer& buf) const
       {
-        return std::accumulate(buf.begin(), buf.end(), 0,
-                               std::bit_xor< size_t >());
+        size_t hash;
+        std::memcpy(&hash, buf.data(), sizeof(hash));
+        return hash;
       }
     };
 
    private:
-    using AlignedStorage = typename std::aligned_storage< sizeof(Data),
-                                                          alignof(uint64_t) >::
-        type;  // why did we align to the nearest double-precision float
-    AlignedStorage val;
+    Data m_data;
   };
 }  // namespace llarp
 

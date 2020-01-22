@@ -1,32 +1,23 @@
 #include <ev/ev.h>
-#include <util/logic.hpp>
 #include <util/mem.hpp>
 #include <util/string_view.hpp>
+#include <util/thread/logic.hpp>
 #include <net/net_addr.hpp>
 
 #include <cstddef>
 #include <cstring>
 
 // We libuv now
-#ifndef _WIN32
 #include <ev/ev_libuv.hpp>
-#elif defined(_WIN32) || defined(_WIN64) || defined(__NT__)
+#if defined(_WIN32) || defined(_WIN64) || defined(__NT__)
 #define SHUT_RDWR SD_BOTH
 #include <ev/ev_win32.hpp>
-#else
-#error No async event loop for your platform, port libuv to your operating system
 #endif
 
 llarp_ev_loop_ptr
 llarp_make_ev_loop()
 {
-#ifndef _WIN32
   llarp_ev_loop_ptr r = std::make_shared< libuv::Loop >();
-#elif defined(_WIN32) || defined(_WIN64) || defined(__NT__)
-  llarp_ev_loop_ptr r = std::make_shared< llarp_win32_loop >();
-#else
-#error no event loop subclass
-#endif
   r->init();
   r->update_time();
   return r;
@@ -40,14 +31,9 @@ llarp_ev_loop_run_single_process(llarp_ev_loop_ptr ev,
   {
     ev->update_time();
     ev->tick(EV_TICK_INTERVAL);
-    if(ev->running())
-    {
-      ev->update_time();
-      logic->tick_async(ev->time_now());
-      llarp_threadpool_tick(logic->thread);
-    }
     llarp::LogContext::Instance().logStream->Tick(ev->time_now());
   }
+  logic->clear_event_loop();
   ev->stopped();
 }
 
@@ -93,7 +79,6 @@ llarp_ev_udp_sendto(struct llarp_udp_io *udp, const sockaddr *to,
 bool
 llarp_ev_add_tun(struct llarp_ev_loop *loop, struct llarp_tun_io *tun)
 {
-#if !defined(_WIN32)
   if(tun->ifaddr[0] == 0 || strcmp(tun->ifaddr, "auto") == 0)
   {
     LogError("invalid ifaddr on tun: ", tun->ifaddr);
@@ -104,6 +89,7 @@ llarp_ev_add_tun(struct llarp_ev_loop *loop, struct llarp_tun_io *tun)
     LogError("invalid ifname on tun: ", tun->ifname);
     return false;
   }
+#if !defined(_WIN32)
   return loop->tun_listen(tun);
 #else
   UNREFERENCED_PARAMETER(loop);
@@ -113,7 +99,7 @@ llarp_ev_add_tun(struct llarp_ev_loop *loop, struct llarp_tun_io *tun)
   if(dev)
   {
     dev->setup();
-    return dev->add_ev();  // start up tun and add to event queue
+    return dev->add_ev(loop);  // start up tun and add to event queue
   }
   llarp::LogWarn("Loop could not create tun");
   return false;
@@ -149,6 +135,7 @@ llarp_tcp_conn_async_write(struct llarp_tcp_conn *conn, const llarp_buffer_t &b)
     if(amount <= 0)
     {
       llarp::LogError("write underrun");
+      llarp_tcp_conn_close(conn);
       return false;
     }
     buf.underlying.cur += amount;

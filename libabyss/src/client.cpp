@@ -3,7 +3,7 @@
 #include <abyss/md5.hpp>
 #include <crypto/crypto.hpp>
 #include <util/buffer.hpp>
-#include <util/logger.hpp>
+#include <util/logging/logger.hpp>
 
 namespace abyss
 {
@@ -12,8 +12,6 @@ namespace abyss
     namespace json = llarp::json;
     struct ConnImpl : HeaderReader
     {
-      // big
-      static const size_t MAX_BODY_SIZE = (1024 * 1024);
       llarp_tcp_conn* m_Conn;
       JSONRPC* m_Parent;
       nlohmann::json m_RequestBody;
@@ -225,12 +223,7 @@ namespace abyss
           // no content-length header
           if(itr == Header.Headers.end())
             return false;
-
-          // check size
           contentSize = std::stoul(itr->second);
-          if(contentSize > MAX_BODY_SIZE)
-            return false;
-
           m_BodyParser.reset(json::MakeParser(contentSize));
         }
         if(m_BodyParser && m_BodyParser->FeedData(buf, sz))
@@ -416,7 +409,7 @@ namespace abyss
     bool
     JSONRPC::RunAsync(llarp_ev_loop_ptr loop, const std::string& remote)
     {
-      strncpy(m_connect.remote, remote.c_str(), sizeof(m_connect.remote));
+      strncpy(m_connect.remote, remote.c_str(), sizeof(m_connect.remote) - 1);
       // TODO: ipv6
       m_connect.connected = &JSONRPC::OnConnected;
       m_connect.error     = &JSONRPC::OnConnectFail;

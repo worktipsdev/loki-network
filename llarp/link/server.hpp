@@ -6,9 +6,10 @@
 #include <link/session.hpp>
 #include <net/net.hpp>
 #include <router_contact.hpp>
-#include <util/logic.hpp>
-#include <util/threading.hpp>
 #include <util/status.hpp>
+#include <util/thread/logic.hpp>
+#include <util/thread/threading.hpp>
+#include <config/key_manager.hpp>
 
 #include <list>
 #include <memory>
@@ -45,13 +46,17 @@ namespace llarp
   /// handles close of all sessions with pubkey
   using SessionClosedHandler = std::function< void(llarp::RouterID) >;
 
+  /// notifies router that a link session has ended its pump and we should flush
+  /// messages to upper layers
+  using PumpDoneHandler = std::function< void(void) >;
+
   struct ILinkLayer
   {
-    ILinkLayer(const SecretKey& routerEncSecret, GetRCFunc getrc,
+    ILinkLayer(std::shared_ptr< KeyManager > keyManager, GetRCFunc getrc,
                LinkMessageHandler handler, SignBufferFunc signFunc,
                SessionEstablishedHandler sessionEstablish,
                SessionRenegotiateHandler renegotiate, TimeoutHandler timeout,
-               SessionClosedHandler closed);
+               SessionClosedHandler closed, PumpDoneHandler pumpDone);
     virtual ~ILinkLayer();
 
     /// get current time via event loop
@@ -77,25 +82,7 @@ namespace llarp
         LOCKS_EXCLUDED(m_AuthedLinksMutex);
 
     static void
-    udp_tick(llarp_udp_io* udp)
-    {
-      static_cast< ILinkLayer* >(udp->user)->Pump();
-    }
-
-    static void
-    udp_recv_from(llarp_udp_io* udp, const sockaddr* from, ManagedBuffer buf)
-    {
-      if(!udp)
-      {
-        llarp::LogWarn("no udp set");
-        return;
-      }
-      const llarp::Addr srcaddr(*from);
-      // maybe check from too?
-      // no it's never null
-      static_cast< ILinkLayer* >(udp->user)->RecvFrom(
-          srcaddr, buf.underlying.base, buf.underlying.sz);
-    }
+    udp_tick(llarp_udp_io* udp);
 
     void
     SendTo_LL(const llarp::Addr& to, const llarp_buffer_t& pkt)
@@ -103,7 +90,7 @@ namespace llarp
       llarp_ev_udp_sendto(&m_udp, to, pkt);
     }
 
-    bool
+    virtual bool
     Configure(llarp_ev_loop_ptr loop, const std::string& ifname, int af,
               uint16_t port);
 
@@ -114,7 +101,7 @@ namespace llarp
     Pump();
 
     virtual void
-    RecvFrom(const Addr& from, const void* buf, size_t sz) = 0;
+    RecvFrom(const Addr& from, ILinkSession::Packet_t pkt) = 0;
 
     bool
     PickAddress(const RouterContact& rc, AddressInfo& picked) const;
@@ -122,10 +109,11 @@ namespace llarp
     bool
     TryEstablishTo(RouterContact rc);
 
-    virtual bool
-    Start(std::shared_ptr< llarp::Logic > l);
+    bool
+    Start(std::shared_ptr< llarp::Logic > l,
+          std::shared_ptr< thread::ThreadPool > worker);
 
-    void
+    virtual void
     Stop();
 
     virtual const char*
@@ -140,11 +128,11 @@ namespace llarp
     void
     KeepAliveSessionTo(const RouterID& remote);
 
-    bool
+    virtual bool
     SendTo(const RouterID& remote, const llarp_buffer_t& buf,
            ILinkSession::CompletionHandler completed);
 
-    bool
+    virtual bool
     GetOurAddressInfo(AddressInfo& addr) const;
 
     bool
@@ -154,9 +142,6 @@ namespace llarp
 
     virtual uint16_t
     Rank() const = 0;
-
-    virtual bool
-    KeyGen(SecretKey&) = 0;
 
     const byte_t*
     TransportPubKey() const;
@@ -180,13 +165,7 @@ namespace llarp
       return false;
     }
 
-    bool
-    EnsureKeys(const char* fpath);
-
-    bool
-    GenEphemeralKeys();
-
-    bool
+    virtual bool
     MapAddr(const RouterID& pk, ILinkSession* s);
 
     void
@@ -199,6 +178,14 @@ namespace llarp
     SessionEstablishedHandler SessionEstablished;
     SessionClosedHandler SessionClosed;
     SessionRenegotiateHandler SessionRenegotiate;
+    PumpDoneHandler PumpDone;
+    std::shared_ptr< KeyManager > keyManager;
+
+    std::shared_ptr< Logic >
+    logic()
+    {
+      return m_Logic;
+    }
 
     bool
     operator<(const ILinkLayer& other) const
@@ -211,18 +198,17 @@ namespace llarp
     // void
     // RemovePending(ILinkSession* s) LOCKS_EXCLUDED(m_PendingMutex);
 
-   private:
-    static void
-    on_timer_tick(void* user, uint64_t orig, uint64_t left)
+    /// count the number of sessions that are yet to be fully connected
+    size_t
+    NumberOfPendingSessions() const
     {
-      // timer cancelled
-      if(left)
-        return;
-      static_cast< ILinkLayer* >(user)->OnTick(orig);
+      ACQUIRE_LOCK(Lock_t lock, m_PendingMutex);
+      return m_Pending.size();
     }
 
+   private:
     void
-    OnTick(uint64_t interval);
+    OnTick();
 
     void
     ScheduleTick(uint64_t interval);
@@ -231,13 +217,18 @@ namespace llarp
     const SecretKey& m_RouterEncSecret;
 
    protected:
-    using Lock  = util::Lock;
-    using Mutex = util::Mutex;
-
+#ifdef TRACY_ENABLE
+    using Lock_t  = std::lock_guard< LockableBase(std::mutex) >;
+    using Mutex_t = std::mutex;
+#else
+    using Lock_t  = util::NullLock;
+    using Mutex_t = util::NullMutex;
+#endif
     bool
     PutSession(const std::shared_ptr< ILinkSession >& s);
 
-    std::shared_ptr< llarp::Logic > m_Logic = nullptr;
+    std::shared_ptr< llarp::Logic > m_Logic               = nullptr;
+    std::shared_ptr< llarp::thread::ThreadPool > m_Worker = nullptr;
     llarp_ev_loop_ptr m_Loop;
     Addr m_ourAddr;
     llarp_udp_io m_udp;
@@ -249,11 +240,15 @@ namespace llarp
     using Pending =
         std::unordered_multimap< llarp::Addr, std::shared_ptr< ILinkSession >,
                                  llarp::Addr::Hash >;
-
-    mutable Mutex m_AuthedLinksMutex ACQUIRED_BEFORE(m_PendingMutex);
+    mutable DECLARE_LOCK(Mutex_t, m_AuthedLinksMutex,
+                         ACQUIRED_BEFORE(m_PendingMutex));
     AuthedLinks m_AuthedLinks GUARDED_BY(m_AuthedLinksMutex);
-    mutable Mutex m_PendingMutex ACQUIRED_AFTER(m_AuthedLinksMutex);
+    mutable DECLARE_LOCK(Mutex_t, m_PendingMutex,
+                         ACQUIRED_AFTER(m_AuthedLinksMutex));
     Pending m_Pending GUARDED_BY(m_PendingMutex);
+
+    std::unordered_map< llarp::Addr, llarp_time_t, llarp::Addr::Hash >
+        m_RecentlyClosed;
   };
 
   using LinkLayer_ptr = std::shared_ptr< ILinkLayer >;

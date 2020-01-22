@@ -1,16 +1,16 @@
 #include <dht/context.hpp>
 #include <dht/messages/gotrouter.hpp>
 
+#include <memory>
 #include <path/path_context.hpp>
 #include <router/abstractrouter.hpp>
+#include <router/i_rc_lookup_handler.hpp>
 
 namespace llarp
 {
   namespace dht
   {
-    GotRouterMessage::~GotRouterMessage()
-    {
-    }
+    GotRouterMessage::~GotRouterMessage() = default;
 
     bool
     GotRouterMessage::BEncode(llarp_buffer_t *buf) const
@@ -56,7 +56,7 @@ namespace llarp
       {
         if(K)  // duplicate key?
           return false;
-        K.reset(new dht::Key_t());
+        K = std::make_unique< dht::Key_t >();
         return K->BDecode(val);
       }
       if(key == "N")
@@ -72,8 +72,8 @@ namespace llarp
         return bencode_read_integer(val, &txid);
       }
       bool read = false;
-      if(!BEncodeMaybeReadVersion("V", version, LLARP_PROTO_VERSION, read, key,
-                                  val))
+      if(!BEncodeMaybeVerifyVersion("V", version, LLARP_PROTO_VERSION, read,
+                                    key, val))
         return false;
 
       return read;
@@ -98,6 +98,7 @@ namespace llarp
 
       if(dht.pendingExploreLookups().HasPendingLookupFrom(owner))
       {
+        LogDebug("got ", N.size(), " results in GRM for explore");
         if(N.size() == 0)
           dht.pendingExploreLookups().NotFound(owner, K);
         else
@@ -109,14 +110,22 @@ namespace llarp
       // not explore lookup
       if(dht.pendingRouterLookups().HasPendingLookupFrom(owner))
       {
+        LogDebug("got ", R.size(), " results in GRM for lookup");
         if(R.size() == 0)
           dht.pendingRouterLookups().NotFound(owner, K);
+        else if(R[0].pubkey.IsZero())
+          return false;
         else
           dht.pendingRouterLookups().Found(owner, R[0].pubkey, R);
         return true;
       }
-      llarp::LogWarn("Unwarranted GRM from ", From, " txid=", txid);
-      return false;
+      // store if valid
+      for(const auto &rc : R)
+      {
+        if(not dht.GetRouter()->rcLookupHandler().CheckRC(rc))
+          return false;
+      }
+      return true;
     }
   }  // namespace dht
 }  // namespace llarp

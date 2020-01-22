@@ -67,15 +67,17 @@ Build requirements:
 
 * GNU Make
 * CMake
-* C++ 17 capable C++ compiler
+* C++ 14 capable C++ compiler
 * gcovr (if generating test coverage with gcc)
 * libuv >= 1.27.0
+* libsodium >= 1.0.17
+* libcurl
 
 ### Linux
 
 build:
 
-    $ sudo apt install build-essential cmake git libcap-dev curl libuv1-dev
+    $ sudo apt install build-essential cmake git libcap-dev curl libuv1-dev libsodium-dev libcurl4-openssl-dev pkg-config
     $ git clone https://github.com/loki-project/loki-network
     $ cd loki-network
     $ make 
@@ -91,10 +93,21 @@ alternatively make a debian package with:
 
 this puts the built packages in `../`
 
+
+#### Static Linux
+
+static native optimized:
+
+    $ make static STATIC_LINK=ON
+
+cross compile fully static armhf (rpi 2 and up)
+
+    $ make static STATIC_LINK=ON DOWNLOAD_SODIUM=ON TOOLCHAIN=contrib/cross/armhf.toolchain.cmake
+
 ### MacOS
 
 build:
-    make sure you have cmake and xcode command line tools installed
+    make sure you have cmake, libuv and xcode command line tools installed
     
     $ git clone https://github.com/loki-project/loki-network
     $ cd loki-network
@@ -169,11 +182,13 @@ install (root):
 
 build:
 
-    $ pkg install cmake git curl libuv-1.27.0
+    $ pkg install cmake git curl libuv libsodium pkgconf
     $ git clone https://github.com/loki-project/loki-network
     $ cd loki-network
-    $ gmake -j8
+    $ mkdir build
+    $ cmake -DCMAKE_BUILD_TYPE=Release ..
+    $ make
 
 install (root):
 
-    # gmake install
+    # make install

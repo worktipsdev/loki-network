@@ -3,33 +3,40 @@
 #include <router/abstractrouter.hpp>
 #include <routing/path_transfer_message.hpp>
 #include <service/endpoint.hpp>
-#include <util/logic.hpp>
+#include <util/thread/logic.hpp>
+#include <utility>
+#include <unordered_set>
 
 namespace llarp
 {
   namespace service
   {
-    SendContext::SendContext(const ServiceInfo& ident,
-                             const Introduction& intro, path::PathSet* send,
-                             Endpoint* ep)
-        : remoteIdent(ident)
+    static constexpr size_t SendContextQueueSize = 512;
+
+    SendContext::SendContext(ServiceInfo ident, const Introduction& intro,
+                             path::PathSet* send, Endpoint* ep)
+        : remoteIdent(std::move(ident))
         , remoteIntro(intro)
         , m_PathSet(send)
         , m_DataHandler(ep)
         , m_Endpoint(ep)
+        , m_SendQueue(SendContextQueueSize)
     {
       createdAt = ep->Now();
-      currentConvoTag.Zero();
     }
 
     bool
-    SendContext::Send(const ProtocolFrame& msg, path::Path_ptr path)
+    SendContext::Send(std::shared_ptr< ProtocolFrame > msg, path::Path_ptr path)
     {
-      util::Lock lock(&m_SendQueueMutex);
-      m_SendQueue.emplace_back(
-          std::make_shared< const routing::PathTransferMessage >(
-              msg, remoteIntro.pathID),
-          path);
+      if(m_SendQueue.empty() or m_SendQueue.full())
+      {
+        LogicCall(m_Endpoint->RouterLogic(),
+                  [self = this]() { self->FlushUpstream(); });
+      }
+      m_SendQueue.pushBack(
+          std::make_pair(std::make_shared< const routing::PathTransferMessage >(
+                             *msg, remoteIntro.pathID),
+                         path));
       return true;
     }
 
@@ -37,17 +44,27 @@ namespace llarp
     SendContext::FlushUpstream()
     {
       auto r = m_Endpoint->Router();
-      util::Lock lock(&m_SendQueueMutex);
-      for(const auto& item : m_SendQueue)
+      std::unordered_set< path::Path_ptr, path::Path::Ptr_Hash > flushpaths;
       {
-        if(item.second->SendRoutingMessage(*item.first, r))
+        do
         {
-          lastGoodSend = r->Now();
-        }
-        else
-          LogError(m_Endpoint->Name(), " failed to send frame on path");
+          auto maybe = m_SendQueue.tryPopFront();
+          if(not maybe.has_value())
+            break;
+          auto& item = maybe.value();
+          if(item.second->SendRoutingMessage(*item.first, r))
+          {
+            lastGoodSend = r->Now();
+            flushpaths.emplace(item.second);
+            m_Endpoint->MarkConvoTagActive(item.first->T.T);
+          }
+        } while(not m_SendQueue.empty());
       }
-      m_SendQueue.clear();
+      // flush the select path's upstream
+      for(const auto& path : flushpaths)
+      {
+        path->FlushUpstream(r);
+      }
     }
 
     /// send on an established convo tag
@@ -55,10 +72,10 @@ namespace llarp
     SendContext::EncryptAndSendTo(const llarp_buffer_t& payload, ProtocolType t)
     {
       SharedSecret shared;
-      ProtocolFrame f;
-      f.N.Randomize();
-      f.T = currentConvoTag;
-      f.S = ++sequenceNo;
+      auto f = std::make_shared< ProtocolFrame >();
+      f->N.Randomize();
+      f->T = currentConvoTag;
+      f->S = ++sequenceNo;
 
       auto path = m_PathSet->GetNewestPathByRouter(remoteIntro.router);
       if(!path)
@@ -68,36 +85,39 @@ namespace llarp
         return;
       }
 
-      if(!m_DataHandler->GetCachedSessionKeyFor(f.T, shared))
+      if(!m_DataHandler->GetCachedSessionKeyFor(f->T, shared))
       {
         LogError(m_Endpoint->Name(),
-                 " has no cached session key on session T=", f.T);
+                 " has no cached session key on session T=", f->T);
         return;
       }
 
-      ProtocolMessage m;
-      m_DataHandler->PutIntroFor(f.T, remoteIntro);
-      m_DataHandler->PutReplyIntroFor(f.T, path->intro);
-      m.proto      = t;
-      m.seqno      = m_Endpoint->GetSeqNoForConvo(f.T);
-      m.introReply = path->intro;
-      f.F          = m.introReply.pathID;
-      m.sender     = m_Endpoint->GetIdentity().pub;
-      m.tag        = f.T;
-      m.PutBuffer(payload);
-      if(!f.EncryptAndSign(m, shared, m_Endpoint->GetIdentity()))
-      {
-        LogError(m_Endpoint->Name(), " failed to sign message");
-        return;
-      }
-      Send(f, path);
+      auto m = std::make_shared< ProtocolMessage >();
+      m_DataHandler->PutIntroFor(f->T, remoteIntro);
+      m_DataHandler->PutReplyIntroFor(f->T, path->intro);
+      m->proto      = t;
+      m->seqno      = m_Endpoint->GetSeqNoForConvo(f->T);
+      m->introReply = path->intro;
+      f->F          = m->introReply.pathID;
+      m->sender     = m_Endpoint->GetIdentity().pub;
+      m->tag        = f->T;
+      m->PutBuffer(payload);
+      auto self = this;
+      m_Endpoint->CryptoWorker()->addJob([f, m, shared, path, self]() {
+        if(not f->EncryptAndSign(*m, shared, self->m_Endpoint->GetIdentity()))
+        {
+          LogError(self->m_Endpoint->Name(), " failed to sign message");
+          return;
+        }
+        self->Send(f, path);
+      });
     }
 
     void
     SendContext::AsyncEncryptAndSendTo(const llarp_buffer_t& data,
                                        ProtocolType protocol)
     {
-      if(lastGoodSend)
+      if(lastGoodSend != 0)
       {
         EncryptAndSendTo(data, protocol);
       }

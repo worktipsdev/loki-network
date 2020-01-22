@@ -1,6 +1,7 @@
 #include <path/path.hpp>
 
 #include <exit/exit_messages.hpp>
+#include <link/i_link_manager.hpp>
 #include <messages/discard.hpp>
 #include <messages/relay_commit.hpp>
 #include <messages/relay_status.hpp>
@@ -13,7 +14,7 @@
 #include <routing/transfer_traffic_message.hpp>
 #include <util/buffer.hpp>
 #include <util/endian.hpp>
-#include <util/logic.hpp>
+#include <util/thread/logic.hpp>
 
 #include <deque>
 
@@ -24,14 +25,22 @@ namespace llarp
     Path::Path(const std::vector< RouterContact >& h, PathSet* parent,
                PathRole startingRoles)
         : m_PathSet(parent), _role(startingRoles)
+
     {
       hops.resize(h.size());
       size_t hsz = h.size();
       for(size_t idx = 0; idx < hsz; ++idx)
       {
         hops[idx].rc = h[idx];
-        hops[idx].txID.Randomize();
-        hops[idx].rxID.Randomize();
+        do
+        {
+          hops[idx].txID.Randomize();
+        } while(hops[idx].txID.IsZero());
+
+        do
+        {
+          hops[idx].rxID.Randomize();
+        } while(hops[idx].rxID.IsZero());
       }
 
       for(size_t idx = 0; idx < hsz - 1; ++idx)
@@ -42,6 +51,23 @@ namespace llarp
       intro.router = hops[hsz - 1].rc.pubkey;
       intro.pathID = hops[hsz - 1].txID;
       EnterState(ePathBuilding, parent->Now());
+    }
+
+    bool
+    Path::HandleUpstream(const llarp_buffer_t& X, const TunnelNonce& Y,
+                         AbstractRouter* r)
+
+    {
+      return m_UpstreamReplayFilter.Insert(Y)
+          and IHopHandler::HandleUpstream(X, Y, r);
+    }
+
+    bool
+    Path::HandleDownstream(const llarp_buffer_t& X, const TunnelNonce& Y,
+                           AbstractRouter* r)
+    {
+      return m_DownstreamReplayFilter.Insert(Y)
+          and IHopHandler::HandleDownstream(X, Y, r);
     }
 
     void
@@ -106,14 +132,16 @@ namespace llarp
     Path::HandleLRSM(uint64_t status, std::array< EncryptedFrame, 8 >& frames,
                      AbstractRouter* r)
     {
-      uint64_t currentStatus = LR_StatusRecord::SUCCESS;
+      uint64_t currentStatus = status;
 
       size_t index = 0;
+      absl::optional< RouterID > failedAt;
       while(index < hops.size())
       {
         if(!frames[index].DoDecrypt(hops[index].shared))
         {
           currentStatus = LR_StatusRecord::FAIL_DECRYPT_ERROR;
+          failedAt      = hops[index].rc.pubkey;
           break;
         }
         llarp::LogDebug("decrypted LRSM frame from ", hops[index].rc.pubkey);
@@ -128,32 +156,46 @@ namespace llarp
           llarp::LogWarn("malformed frame inside LRCM from ",
                          hops[index].rc.pubkey);
           currentStatus = LR_StatusRecord::FAIL_MALFORMED_RECORD;
+          failedAt      = hops[index].rc.pubkey;
           break;
         }
         llarp::LogDebug("Decoded LR Status Record from ",
                         hops[index].rc.pubkey);
 
         currentStatus = record.status;
-
-        if((currentStatus & LR_StatusRecord::SUCCESS) == 0)
+        if((record.status & LR_StatusRecord::SUCCESS)
+           != LR_StatusRecord::SUCCESS)
         {
+          // failed at next hop
+          if(index + 1 < hops.size())
+          {
+            failedAt = hops[index + 1].rc.pubkey;
+          }
+          else
+          {
+            failedAt = hops[index].rc.pubkey;
+          }
           break;
         }
-
         ++index;
       }
 
-      if((currentStatus & LR_StatusRecord::SUCCESS) == 1)
+      if((currentStatus & LR_StatusRecord::SUCCESS) == LR_StatusRecord::SUCCESS)
       {
         llarp::LogDebug("LR_Status message processed, path build successful");
         auto self = shared_from_this();
-        r->logic()->queue_func([=]() { self->HandlePathConfirmMessage(r); });
+        LogicCall(r->logic(), [=]() { self->HandlePathConfirmMessage(r); });
       }
       else
       {
-        r->routerProfiling().MarkPathFail(this);
-
-        llarp::LogInfo("LR_Status message processed, path build failed");
+        if(failedAt.has_value())
+        {
+          LogWarn(Name(), " build failed at ", failedAt.value());
+          r->routerProfiling().MarkHopFail(failedAt.value());
+        }
+        else
+          r->routerProfiling().MarkPathFail(this);
+        llarp::LogDebug("LR_Status message processed, path build failed");
 
         if(currentStatus & LR_StatusRecord::FAIL_TIMEOUT)
         {
@@ -197,13 +239,14 @@ namespace llarp
         {
           llarp::LogDebug("Path build failed for an unspecified reason");
         }
-
-        EnterState(ePathFailed, r->Now());
+        auto self = shared_from_this();
+        LogicCall(r->logic(),
+                  [=]() { self->EnterState(ePathFailed, r->Now()); });
       }
 
       // TODO: meaningful return value?
       return true;
-    }
+    }  // namespace path
 
     void
     Path::EnterState(PathStatus st, llarp_time_t now)
@@ -211,8 +254,10 @@ namespace llarp
       if(st == ePathFailed)
       {
         _status = st;
+        m_PathSet->HandlePathBuildFailed(shared_from_this());
+        return;
       }
-      else if(st == ePathExpired && _status == ePathBuilding)
+      if(st == ePathExpired && _status == ePathBuilding)
       {
         _status = st;
         m_PathSet->HandlePathBuildTimeout(shared_from_this());
@@ -269,30 +314,30 @@ namespace llarp
                      [](const auto& hop) -> util::StatusObject {
                        return hop.ExtractStatus();
                      });
-      obj.Put("hops", hopsObj);
+      obj["hops"] = hopsObj;
 
       switch(_status)
       {
         case ePathBuilding:
-          obj.Put("status", "building");
+          obj["status"] = "building";
           break;
         case ePathEstablished:
-          obj.Put("status", "established");
+          obj["status"] = "established";
           break;
         case ePathTimeout:
-          obj.Put("status", "timeout");
+          obj["status"] = "timeout";
           break;
         case ePathExpired:
-          obj.Put("status", "expired");
+          obj["status"] = "expired";
           break;
         case ePathFailed:
-          obj.Put("status", "failed");
+          obj["status"] = "failed";
           break;
         case ePathIgnore:
-          obj.Put("status", "ignored");
+          obj["status"] = "ignored";
           break;
         default:
-          obj.Put("status", "unknown");
+          obj["status"] = "unknown";
           break;
       }
       return obj;
@@ -314,13 +359,19 @@ namespace llarp
       if(Expired(now))
         return;
 
+      m_UpstreamReplayFilter.Decay(now);
+      m_DownstreamReplayFilter.Decay(now);
+
       if(_status == ePathBuilding)
       {
+        if(buildStarted == 0)
+          return;
         if(now >= buildStarted)
         {
-          auto dlt = now - buildStarted;
+          const auto dlt = now - buildStarted;
           if(dlt >= path::build_timeout)
           {
+            LogWarn(Name(), " waited for ", dlt, "ms and no path was built");
             r->routerProfiling().MarkPathFail(this);
             EnterState(ePathExpired, now);
             return;
@@ -338,6 +389,7 @@ namespace llarp
           m_LastLatencyTestID   = latency.T;
           m_LastLatencyTestTime = now;
           SendRoutingMessage(latency, r);
+          FlushUpstream(r);
           return;
         }
         if(m_LastRecvMessage && now > m_LastRecvMessage)
@@ -345,6 +397,7 @@ namespace llarp
           const auto delay = now - m_LastRecvMessage;
           if(m_CheckForDead && m_CheckForDead(shared_from_this(), delay))
           {
+            LogWarn(Name(), " waited for ", dlt, "ms and path is unresponsive");
             r->routerProfiling().MarkPathFail(this);
             EnterState(ePathTimeout, now);
           }
@@ -353,6 +406,7 @@ namespace llarp
         {
           if(m_CheckForDead && m_CheckForDead(shared_from_this(), dlt))
           {
+            LogWarn(Name(), " waited for ", dlt, "ms and path looks dead");
             r->routerProfiling().MarkPathFail(this);
             EnterState(ePathTimeout, now);
           }
@@ -360,24 +414,67 @@ namespace llarp
       }
     }
 
-    bool
-    Path::HandleUpstream(const llarp_buffer_t& buf, const TunnelNonce& Y,
-                         AbstractRouter* r)
+    void
+    Path::HandleAllUpstream(std::vector< RelayUpstreamMessage > msgs,
+                            AbstractRouter* r)
     {
-      TunnelNonce n = Y;
-      for(const auto& hop : hops)
+      for(const auto& msg : msgs)
       {
-        CryptoManager::instance()->xchacha20(buf, hop.shared, n);
-        n ^= hop.nonceXOR;
+        if(!r->SendToOrQueue(Upstream(), &msg))
+        {
+          LogDebug("failed to send upstream to ", Upstream());
+        }
       }
-      RelayUpstreamMessage msg;
-      msg.X      = buf;
-      msg.Y      = Y;
-      msg.pathid = TXID();
-      if(r->SendToOrQueue(Upstream(), &msg))
-        return true;
-      LogError("send to ", Upstream(), " failed");
-      return false;
+      r->linkManager().PumpLinks();
+    }
+
+    void
+    Path::UpstreamWork(TrafficQueue_ptr msgs, AbstractRouter* r)
+    {
+      std::vector< RelayUpstreamMessage > sendmsgs(msgs->size());
+      size_t idx = 0;
+      for(auto& ev : *msgs)
+      {
+        const llarp_buffer_t buf(ev.first);
+        TunnelNonce n = ev.second;
+        for(const auto& hop : hops)
+        {
+          CryptoManager::instance()->xchacha20(buf, hop.shared, n);
+          n ^= hop.nonceXOR;
+        }
+        auto& msg  = sendmsgs[idx];
+        msg.X      = buf;
+        msg.Y      = ev.second;
+        msg.pathid = TXID();
+        ++idx;
+      }
+      LogicCall(r->logic(),
+                std::bind(&Path::HandleAllUpstream, shared_from_this(),
+                          std::move(sendmsgs), r));
+    }
+
+    void
+    Path::FlushUpstream(AbstractRouter* r)
+    {
+      if(m_UpstreamQueue && !m_UpstreamQueue->empty())
+      {
+        r->threadpool()->addJob(std::bind(&Path::UpstreamWork,
+                                          shared_from_this(),
+                                          std::move(m_UpstreamQueue), r));
+      }
+      m_UpstreamQueue = nullptr;
+    }
+
+    void
+    Path::FlushDownstream(AbstractRouter* r)
+    {
+      if(m_DownstreamQueue && !m_DownstreamQueue->empty())
+      {
+        r->threadpool()->addJob(std::bind(&Path::DownstreamWork,
+                                          shared_from_this(),
+                                          std::move(m_DownstreamQueue), r));
+      }
+      m_DownstreamQueue = nullptr;
     }
 
     bool
@@ -385,11 +482,12 @@ namespace llarp
     {
       if(_status == ePathFailed)
         return true;
-      if(_status == ePathEstablished || _status == ePathTimeout)
-        return now >= ExpireTime();
       if(_status == ePathBuilding)
         return false;
-
+      if(_status == ePathEstablished || _status == ePathTimeout)
+      {
+        return now >= ExpireTime();
+      }
       return true;
     }
 
@@ -403,20 +501,44 @@ namespace llarp
       return ss.str();
     }
 
-    bool
-    Path::HandleDownstream(const llarp_buffer_t& buf, const TunnelNonce& Y,
-                           AbstractRouter* r)
+    void
+    Path::DownstreamWork(TrafficQueue_ptr msgs, AbstractRouter* r)
     {
-      TunnelNonce n = Y;
-      for(const auto& hop : hops)
+      std::vector< RelayDownstreamMessage > sendMsgs(msgs->size());
+      size_t idx = 0;
+      for(auto& ev : *msgs)
       {
-        n ^= hop.nonceXOR;
-        CryptoManager::instance()->xchacha20(buf, hop.shared, n);
+        const llarp_buffer_t buf(ev.first);
+        sendMsgs[idx].Y = ev.second;
+        for(const auto& hop : hops)
+        {
+          sendMsgs[idx].Y ^= hop.nonceXOR;
+          CryptoManager::instance()->xchacha20(buf, hop.shared,
+                                               sendMsgs[idx].Y);
+        }
+        sendMsgs[idx].X = buf;
+        ++idx;
       }
-      if(!HandleRoutingMessage(buf, r))
-        return false;
-      m_LastRecvMessage = r->Now();
-      return true;
+      LogicCall(r->logic(),
+                std::bind(&Path::HandleAllDownstream, shared_from_this(),
+                          std::move(sendMsgs), r));
+    }
+
+    void
+    Path::HandleAllDownstream(std::vector< RelayDownstreamMessage > msgs,
+                              AbstractRouter* r)
+    {
+      for(const auto& msg : msgs)
+      {
+        const llarp_buffer_t buf(msg.X);
+        if(!HandleRoutingMessage(buf, r))
+        {
+          LogWarn("failed to handle downstream message");
+          continue;
+        }
+        m_LastRecvMessage = r->Now();
+      }
+      FlushUpstream(r);
     }
 
     bool
@@ -502,7 +624,7 @@ namespace llarp
     Path::HandlePathConfirmMessage(AbstractRouter* r)
     {
       LogDebug("Path Build Confirm, path: ", HopsString());
-      auto now = r->Now();
+      const auto now = llarp::time_now_ms();
       if(_status == ePathBuilding)
       {
         // finish initializing introduction
@@ -518,7 +640,10 @@ namespace llarp
         latency.T             = randint();
         m_LastLatencyTestID   = latency.T;
         m_LastLatencyTestTime = now;
-        return SendRoutingMessage(latency, r);
+        if(!SendRoutingMessage(latency, r))
+          return false;
+        FlushUpstream(r);
+        return true;
       }
       LogWarn("got unwarranted path confirm message on tx=", RXID(),
               " rx=", RXID());
@@ -544,7 +669,7 @@ namespace llarp
     Path::HandlePathLatencyMessage(const routing::PathLatencyMessage& msg,
                                    AbstractRouter* r)
     {
-      auto now = r->Now();
+      const auto now = r->Now();
       MarkActive(now);
       if(msg.L == m_LastLatencyTestID)
       {

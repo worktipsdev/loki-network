@@ -1,14 +1,16 @@
 #include <rpc/rpc.hpp>
 
+#include <constants/version.hpp>
 #include <router/abstractrouter.hpp>
 #include <service/context.hpp>
-#include <util/logger.hpp>
+#include <util/logging/logger.hpp>
 #include <router_id.hpp>
 #include <exit/context.hpp>
 
 #include <util/encode.hpp>
-#include <util/memfn.hpp>
+#include <util/meta/memfn.hpp>
 #include <libabyss.hpp>
+#include <utility>
 
 namespace llarp
 {
@@ -22,15 +24,13 @@ namespace llarp
       {
       }
 
-      ~CallerHandler()
-      {
-      }
+      ~CallerHandler() override = default;
 
       virtual bool
       HandleJSONResult(const nlohmann::json& val) = 0;
 
       bool
-      HandleResponse(::abyss::http::RPC_Response response)
+      HandleResponse(::abyss::http::RPC_Response response) override
       {
         if(!response.is_object())
         {
@@ -50,7 +50,49 @@ namespace llarp
       }
 
       void
-      PopulateReqHeaders(abyss::http::Headers_t& hdr);
+      PopulateReqHeaders(abyss::http::Headers_t& hdr) override;
+    };
+
+    struct LokiPingHandler final : public CallerHandler
+    {
+      ~LokiPingHandler() override = default;
+      LokiPingHandler(::abyss::http::ConnImpl* impl, CallerImpl* parent)
+          : CallerHandler(impl, parent)
+      {
+      }
+      bool
+      HandleJSONResult(const nlohmann::json& result) override
+      {
+        if(not result.is_object())
+        {
+          LogError("invalid result from lokid ping, not an object");
+          return false;
+        }
+        const auto itr = result.find("status");
+        if(itr == result.end())
+        {
+          LogError("invalid result from lokid ping, no result");
+          return false;
+        }
+        if(not itr->is_string())
+        {
+          LogError("invalid result from lokid ping, status not an string");
+          return false;
+        }
+        const auto status = itr->get< std::string >();
+        if(status != "OK")
+        {
+          LogError("lokid ping failed: '", status, "'");
+          return false;
+        }
+        LogInfo("lokid ping: '", status, "'");
+        return true;
+      }
+      void
+      HandleError() override
+      {
+        LogError("Failed to ping lokid");
+      }
     };
 
     struct GetServiceNodeListHandler final : public CallerHandler
@@ -58,14 +100,12 @@ namespace llarp
       using PubkeyList_t = std::vector< RouterID >;
       using Callback_t   = std::function< void(const PubkeyList_t&, bool) >;
 
-      ~GetServiceNodeListHandler()
-      {
-      }
+      ~GetServiceNodeListHandler() override = default;
       Callback_t handler;
 
       GetServiceNodeListHandler(::abyss::http::ConnImpl* impl,
                                 CallerImpl* parent, Callback_t h)
-          : CallerHandler(impl, parent), handler(h)
+          : CallerHandler(impl, parent), handler(std::move(h))
       {
       }
 
@@ -73,39 +113,41 @@ namespace llarp
       HandleJSONResult(const nlohmann::json& result) override
       {
         PubkeyList_t keys;
-        if(!result.is_object())
+        if(not result.is_object())
         {
           LogWarn("Invalid result: not an object");
           handler({}, false);
           return false;
         }
-        const auto itr = result.find("keys");
+        const auto itr = result.find("service_node_states");
         if(itr == result.end())
         {
-          LogWarn("Invalid result: no keys member");
+          LogWarn("Invalid result: no service_node_states member");
           handler({}, false);
           return false;
         }
-        if(!itr.value().is_array())
+        if(not itr.value().is_array())
         {
-          LogWarn("Invalid result: keys is not an array");
+          LogWarn("Invalid result: service_node_states is not an array");
           handler({}, false);
           return false;
         }
         for(const auto item : itr.value())
         {
-          if(item.is_string())
-          {
-            keys.emplace_back();
-            std::string str = item.get< std::string >();
-            if(!Base32Decode(str, keys.back()))
-            {
-              LogWarn("Invalid key: ", str);
-              keys.pop_back();
-            }
-          }
+          if(not item.is_object())
+            continue;
+          if(not item.value("active", false))
+            continue;
+          if(not item.value("funded", false))
+            continue;
+          const std::string pk = item.value("pubkey_ed25519", "");
+          if(pk.empty())
+            continue;
+          PubKey k;
+          if(k.FromString(pk))
+            keys.emplace_back(std::move(k));
         }
-        handler(keys, true);
+        handler(keys, not keys.empty());
         return true;
       }
 
@@ -120,7 +162,9 @@ namespace llarp
     {
       AbstractRouter* router;
       llarp_time_t m_NextKeyUpdate         = 0;
+      llarp_time_t m_NextPing              = 0;
       const llarp_time_t KeyUpdateInterval = 5000;
+      const llarp_time_t PingInterval      = 60 * 5 * 1000;
       using PubkeyList_t = GetServiceNodeListHandler::PubkeyList_t;
 
       CallerImpl(AbstractRouter* r) : ::abyss::http::JSONRPC(), router(r)
@@ -130,10 +174,19 @@ namespace llarp
       void
       Tick(llarp_time_t now)
       {
+        if(not router->IsRunning())
+          return;
+        if(not router->IsServiceNode())
+          return;
         if(now >= m_NextKeyUpdate)
         {
           AsyncUpdatePubkeyList();
           m_NextKeyUpdate = now + KeyUpdateInterval;
+        }
+        if(now >= m_NextPing)
+        {
+          AsyncLokiPing();
+          m_NextPing = now + PingInterval;
         }
         Flush();
       }
@@ -146,10 +199,23 @@ namespace llarp
       }
 
       void
+      AsyncLokiPing()
+      {
+        LogInfo("Pinging Lokid");
+        nlohmann::json version(llarp::VERSION);
+        nlohmann::json params({{"version", version}});
+        QueueRPC("lokinet_ping", std::move(params),
+                 util::memFn(&CallerImpl::NewLokinetPingConn, this));
+      }
+
+      void
       AsyncUpdatePubkeyList()
       {
         LogInfo("Updating service node list");
-        QueueRPC("get_all_service_nodes_keys", nlohmann::json::object(),
+        nlohmann::json params = {
+            {"fields",
+             {{"pubkey_ed25519", true}, {"active", true}, {"funded", true}}}};
+        QueueRPC("get_n_service_nodes", std::move(params),
                  util::memFn(&CallerImpl::NewAsyncUpdatePubkeyListConn, this));
       }
 
@@ -157,6 +223,12 @@ namespace llarp
       Start(const std::string& remote)
       {
         return RunAsync(router->netloop(), remote);
+      }
+
+      abyss::http::IRPCClientHandler*
+      NewLokinetPingConn(abyss::http::ConnImpl* impl)
+      {
+        return new LokiPingHandler(impl, this);
       }
 
       abyss::http::IRPCClientHandler*
@@ -178,9 +250,7 @@ namespace llarp
           LogError("service node list not updated");
       }
 
-      ~CallerImpl()
-      {
-      }
+      ~CallerImpl() = default;
     };
 
     void
@@ -192,20 +262,37 @@ namespace llarp
     struct Handler : public ::abyss::httpd::IRPCHandler
     {
       AbstractRouter* router;
+      std::unordered_map< absl::string_view, std::function< Response() >,
+                          absl::Hash< absl::string_view > >
+          m_dispatch;
       Handler(::abyss::httpd::ConnImpl* conn, AbstractRouter* r)
-          : ::abyss::httpd::IRPCHandler(conn), router(r)
+          : ::abyss::httpd::IRPCHandler(conn)
+          , router(r)
+          , m_dispatch{
+                {"llarp.admin.wakeup", [=]() { return StartRouter(); }},
+                {"llarp.admin.link.neighbor",
+                 [=]() { return ListNeighbors(); }},
+                {"llarp.admin.exit.list", [=]() { return ListExitLevels(); }},
+                {"llarp.admin.dumpstate", [=]() { return DumpState(); }},
+                {"llarp.admin.status", [=]() { return DumpStatus(); }},
+                {"llarp.our.addresses", [=]() { return OurAddresses(); }},
+                {"llarp.version", [=]() { return DumpVersion(); }}}
       {
       }
 
-      ~Handler()
+      ~Handler() override = default;
+
+      Response
+      StartRouter() const
       {
+        const bool rc = router->Run();
+        return Response{{"status", rc}};
       }
 
       Response
       DumpState() const
       {
-        const util::StatusObject dump = router->ExtractStatus();
-        return dump.get();
+        return router->ExtractStatus();
       }
 
       Response
@@ -227,7 +314,7 @@ namespace llarp
       }
 
       Response
-      ListNeighboors() const
+      ListNeighbors() const
       {
         Response resp = Response::array();
         router->ForEachPeer(
@@ -267,25 +354,36 @@ namespace llarp
         return resp;
       }
 
+      Response
+      OurAddresses() const
+      {
+        Response services;
+        router->hiddenServiceContext().ForEachService(
+            [&](const std::string&,
+                const std::shared_ptr< service::Endpoint >& service) {
+              const service::Address addr = service->GetIdentity().pub.Addr();
+              services.push_back(addr.ToString());
+              return true;
+            });
+
+        return Response{{"services", services}};
+      }
+
+      Response
+      DumpVersion() const
+      {
+        const Response resp{{"version", llarp::VERSION_FULL}};
+        return resp;
+      }
+
       absl::optional< Response >
       HandleJSONRPC(Method_t method,
-                    __attribute__((unused)) const Params& params)
+                    ABSL_ATTRIBUTE_UNUSED const Params& params) override
       {
-        if(method == "llarp.admin.link.neighboors")
+        auto it = m_dispatch.find(method);
+        if(it != m_dispatch.end())
         {
-          return ListNeighboors();
-        }
-        if(method == "llarp.admin.exit.list")
-        {
-          return ListExitLevels();
-        }
-        if(method == "llarp.admin.dumpstate")
-        {
-          return DumpState();
-        }
-        else if(method == "llarp.admin.status")
-        {
-          return DumpStatus();
+          return it->second();
         }
         return false;
       }
@@ -299,7 +397,7 @@ namespace llarp
       }
       AbstractRouter* router;
       ::abyss::httpd::IRPCHandler*
-      CreateHandler(::abyss::httpd::ConnImpl* conn)
+      CreateHandler(::abyss::httpd::ConnImpl* conn) override
       {
         return new Handler(conn, router);
       }
@@ -314,9 +412,7 @@ namespace llarp
       {
       }
 
-      ~ServerImpl()
-      {
-      }
+      ~ServerImpl() = default;
 
       void
       Stop()
@@ -327,18 +423,18 @@ namespace llarp
       bool
       Start(const std::string& addr)
       {
-        uint16_t port = 0;
-        auto idx      = addr.find_first_of(':');
-        Addr netaddr;
-        if(idx != std::string::npos)
-        {
-          port    = std::stoi(addr.substr(1 + idx));
-          netaddr = Addr(addr.substr(0, idx));
-        }
         sockaddr_in saddr;
         saddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         saddr.sin_family      = AF_INET;
-        saddr.sin_port        = htons(port);
+        saddr.sin_port        = 0;
+
+        auto idx = addr.find_first_of(':');
+        if(idx != std::string::npos)
+        {
+          Addr netaddr{addr.substr(0, idx), addr.substr(1 + idx)};
+          saddr.sin_addr.s_addr = netaddr.ton();
+          saddr.sin_port        = htons(netaddr.port());
+        }
         return _handler.ServeAsync(router->netloop(), router->logic(),
                                    (const sockaddr*)&saddr);
       }
@@ -349,9 +445,7 @@ namespace llarp
     {
     }
 
-    Caller::~Caller()
-    {
-    }
+    Caller::~Caller() = default;
 
     void
     Caller::Stop()
@@ -382,9 +476,7 @@ namespace llarp
     {
     }
 
-    Server::~Server()
-    {
-    }
+    Server::~Server() = default;
 
     void
     Server::Stop()

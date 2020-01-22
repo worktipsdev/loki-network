@@ -7,9 +7,7 @@ namespace llarp
 {
   namespace dht
   {
-    FindIntroMessage::~FindIntroMessage()
-    {
-    }
+    FindIntroMessage::~FindIntroMessage() = default;
 
     bool
     FindIntroMessage::DecodeKey(const llarp_buffer_t& k, llarp_buffer_t* val)
@@ -28,8 +26,8 @@ namespace llarp
       if(!BEncodeMaybeReadDictInt("T", T, read, k, val))
         return false;
 
-      if(!BEncodeMaybeReadVersion("V", version, LLARP_PROTO_VERSION, read, k,
-                                  val))
+      if(!BEncodeMaybeVerifyVersion("V", version, LLARP_PROTO_VERSION, read, k,
+                                    val))
         return false;
 
       return read;

@@ -3,6 +3,7 @@
 
 #include <crypto/types.hpp>
 #include <net/net.hpp>
+#include <ev/ev.hpp>
 #include <router_contact.hpp>
 #include <util/types.hpp>
 
@@ -16,9 +17,7 @@ namespace llarp
 
   struct ILinkSession
   {
-    virtual ~ILinkSession()
-    {
-    }
+    virtual ~ILinkSession() = default;
 
     /// delivery status of a message
     enum class DeliveryStatus
@@ -27,9 +26,14 @@ namespace llarp
       eDeliveryDropped = 1
     };
 
+    /// equiv of shared_from_this but for the interface type so
+    /// that each implementation can use shared_from_this
+    virtual std::shared_ptr< ILinkSession >
+    BorrowSelf() = 0;
+
     /// hook for utp for when we have established a connection
     virtual void
-    OnLinkEstablished(ILinkLayer *p) = 0;
+    OnLinkEstablished(ILinkLayer *){};
 
     /// called every event loop tick
     virtual void
@@ -41,9 +45,12 @@ namespace llarp
     /// message delivery result hook function
     using CompletionHandler = std::function< void(DeliveryStatus) >;
 
+    using Packet_t  = PacketBuffer;
+    using Message_t = std::vector< byte_t >;
+
     /// send a message buffer to the remote endpoint
     virtual bool
-    SendMessageBuffer(const llarp_buffer_t &, CompletionHandler handler) = 0;
+    SendMessageBuffer(Message_t, CompletionHandler handler) = 0;
 
     /// start the connection
     virtual void
@@ -51,6 +58,13 @@ namespace llarp
 
     virtual void
     Close() = 0;
+
+    /// recv packet on low layer
+    /// not used by utp
+    virtual bool Recv_LL(Packet_t)
+    {
+      return true;
+    }
 
     /// send a keepalive to the remote endpoint
     virtual bool

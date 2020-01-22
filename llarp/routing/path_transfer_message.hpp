@@ -22,7 +22,7 @@ namespace llarp
       {
         Y.Randomize();
       }
-      ~PathTransferMessage() = default;
+      ~PathTransferMessage() override = default;
 
       bool
       DecodeKey(const llarp_buffer_t& key, llarp_buffer_t* val) override;
@@ -39,6 +39,7 @@ namespace llarp
         P.Zero();
         T.Clear();
         Y.Zero();
+        version = 0;
       }
     };
 

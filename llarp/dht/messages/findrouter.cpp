@@ -57,9 +57,7 @@ namespace llarp
       return true;
     }
 
-    FindRouterMessage::~FindRouterMessage()
-    {
-    }
+    FindRouterMessage::~FindRouterMessage() = default;
 
     bool
     FindRouterMessage::BEncode(llarp_buffer_t *buf) const
@@ -169,7 +167,12 @@ namespace llarp
         return false;
       }
       RouterContact found;
-      const Key_t k{K};
+      if(K.IsZero())
+      {
+        llarp::LogError("invalid FRM from ", From, "K is zero");
+        return false;
+      }
+      const Key_t k(K);
       if(exploritory)
         return dht.HandleExploritoryRouterLookup(From, txid, K, replies);
       if(!dht.GetRouter()->ConnectionToRouterAllowed(K))
@@ -183,8 +186,8 @@ namespace llarp
         replies.emplace_back(new GotRouterMessage(k, txid, {found}, false));
         return true;
       }
-      else
-        dht.LookupRouterRelayed(From, txid, k, !iterative, replies);
+
+      dht.LookupRouterRelayed(From, txid, k, !iterative, replies);
       return true;
     }
   }  // namespace dht

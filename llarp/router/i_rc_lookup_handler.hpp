@@ -37,7 +37,8 @@ namespace llarp
     SetRouterWhitelist(const std::vector< RouterID > &routers) = 0;
 
     virtual void
-    GetRC(const RouterID &router, RCRequestCallback callback) = 0;
+    GetRC(const RouterID &router, RCRequestCallback callback,
+          bool forceLookup = false) = 0;
 
     virtual bool
     RemoteIsAllowed(const RouterID &remote) const = 0;
@@ -56,6 +57,9 @@ namespace llarp
 
     virtual void
     ExploreNetwork() = 0;
+
+    virtual size_t
+    NumberOfStrictConnectRouters() const = 0;
   };
 
 }  // namespace llarp

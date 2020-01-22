@@ -2,17 +2,16 @@
 
 #include <crypto/crypto.hpp>
 #include <crypto/crypto_libsodium.hpp>
-#include <ev/ev.h>
+#include <ev/ev.hpp>
 #include <net/net.hpp>
-#include <util/threading.hpp>
+#include <util/thread/threading.hpp>
 
 #include <gtest/gtest.h>
 
 struct AbyssTestBase : public ::testing::Test
 {
   llarp::sodium::CryptoLibSodium crypto;
-  llarp_threadpool* threadpool = nullptr;
-  llarp_ev_loop_ptr loop       = nullptr;
+  llarp_ev_loop_ptr loop = nullptr;
   std::shared_ptr< llarp::Logic > logic;
   abyss::httpd::BaseReqHandler* server = nullptr;
   abyss::http::JSONRPC* client         = nullptr;
@@ -30,26 +29,12 @@ struct AbyssTestBase : public ::testing::Test
     ASSERT_EQ(meth, method);
   }
 
-  static void
-  CancelIt(void* u, ABSL_ATTRIBUTE_UNUSED uint64_t orig, uint64_t left)
-  {
-    if(left)
-      return;
-    static_cast< AbyssTestBase* >(u)->Stop();
-  }
-
-  static void
-  StopIt(void* u)
-  {
-    static_cast< AbyssTestBase* >(u)->Stop();
-  }
-
   void
   Start()
   {
-    loop       = llarp_make_ev_loop();
-    logic      = std::make_shared< llarp::Logic >();
-    threadpool = logic->thread;
+    loop  = llarp_make_ev_loop();
+    logic = std::make_shared< llarp::Logic >();
+    loop->set_logic(logic);
     sockaddr_in addr;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port        = htons((llarp::randint() % 2000) + 2000);
@@ -60,7 +45,7 @@ struct AbyssTestBase : public ::testing::Test
       if(server->ServeAsync(loop, logic, a))
       {
         client->RunAsync(loop, a.ToString());
-        logic->call_later({1000, this, &CancelIt});
+        logic->call_later(1000, std::bind(&AbyssTestBase::Stop, this));
         return;
       }
       std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -77,13 +62,12 @@ struct AbyssTestBase : public ::testing::Test
   void
   AsyncStop()
   {
-    logic->queue_job({this, &StopIt});
+    LogicCall(logic, std::bind(&AbyssTestBase::Stop, this));
   }
 
   ~AbyssTestBase()
   {
     logic.reset();
-    llarp_free_threadpool(&threadpool);
     llarp::SetLogLevel(llarp::eLogInfo);
   }
 };
@@ -161,16 +145,10 @@ struct AbyssTest : public AbyssTestBase,
     return new ServerHandler(impl, this);
   }
 
-  static void
-  FlushIt(void* u)
-  {
-    static_cast< AbyssTest* >(u)->Flush();
-  }
-
   void
   AsyncFlush()
   {
-    logic->queue_job({this, &FlushIt});
+    LogicCall(logic, std::bind(&AbyssTest::Flush, this));
   }
 
   void

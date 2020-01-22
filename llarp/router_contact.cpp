@@ -5,7 +5,7 @@
 #include <net/net.hpp>
 #include <util/bencode.hpp>
 #include <util/buffer.hpp>
-#include <util/logger.hpp>
+#include <util/logging/logger.hpp>
 #include <util/mem.hpp>
 #include <util/printer.hpp>
 #include <util/time.hpp>
@@ -19,11 +19,11 @@ namespace llarp
   NetID::DefaultValue()
   {
     static NetID defaultID(
-        reinterpret_cast< const byte_t * >(Version::LLARP_NET_ID));
+        reinterpret_cast< const byte_t * >(llarp::DEFAULT_NETID));
     return defaultID;
   }
 
-  bool RouterContact::IgnoreBogons = false;
+  bool RouterContact::BlockBogons = true;
 
 #ifdef TESTNET
   // 1 minute for testnet
@@ -32,12 +32,13 @@ namespace llarp
   /// 1 day for real network
   llarp_time_t RouterContact::Lifetime = 24 * 60 * 60 * 1000;
 #endif
-  /// update RCs every 5 minutes
-  llarp_time_t RouterContact::UpdateInterval = 5 * 60 * 1000;
-  /// an RC inserted long enough ago (30 min) is considered stale and is removed
-  llarp_time_t RouterContact::StaleInsertionAge = 30 * 60 * 1000;
+  /// an RC inserted long enough ago (4 hrs) is considered stale and is removed
+  llarp_time_t RouterContact::StaleInsertionAge = 4 * 60 * 60 * 1000;
+  /// update RCs shortly before they are about to expire
+  llarp_time_t RouterContact::UpdateInterval =
+      RouterContact::StaleInsertionAge - (5 * 60 * 1000);
 
-  NetID::NetID(const byte_t *val) : AlignedBuffer< 8 >()
+  NetID::NetID(const byte_t *val)
   {
     size_t len = strnlen(reinterpret_cast< const char * >(val), size());
     std::copy(val, val + len, begin());
@@ -67,6 +68,7 @@ namespace llarp
     llarp_buffer_t strbuf;
     if(!bencode_read_string(buf, &strbuf))
       return false;
+
     if(strbuf.sz > size())
       return false;
 
@@ -106,13 +108,17 @@ namespace llarp
       return false;
 
     std::string nick = Nick();
-    if(nick.size())
+    if(!nick.empty())
     {
       /* write nickname */
       if(!bencode_write_bytestring(buf, "n", 1))
+      {
         return false;
+      }
       if(!bencode_write_bytestring(buf, nick.c_str(), nick.size()))
+      {
         return false;
+      }
     }
 
     /* write encryption pubkey */
@@ -127,8 +133,8 @@ namespace llarp
     if(!bencode_write_uint64(buf, last_updated))
       return false;
 
-    /* write version */
-    if(!bencode_write_version_entry(buf))
+    /* write versions */
+    if(!bencode_write_uint64_entry(buf, "v", 1, version))
       return false;
 
     /* write xi if they exist */
@@ -163,9 +169,14 @@ namespace llarp
     util::StatusObject obj{{"lastUpdated", last_updated},
                            {"exit", IsExit()},
                            {"publicRouter", IsPublicRouter()},
-                           {"identity", pubkey.ToHex()}};
+                           {"identity", pubkey.ToString()},
+                           {"addresses", addrs}};
+
     if(HasNick())
-      obj.Put("nickname", Nick());
+    {
+      obj["nickname"] = Nick();
+    }
+
     return obj;
   }
 
@@ -186,9 +197,13 @@ namespace llarp
     {
       llarp_buffer_t strbuf;
       if(!bencode_read_string(buf, &strbuf))
+      {
         return false;
-      if(strbuf.sz > nickname.size())
+      }
+      if(strbuf.sz > llarp::AlignedBuffer< (32) >::size())
+      {
         return false;
+      }
       nickname.Zero();
       std::copy(strbuf.base, strbuf.base + strbuf.sz, nickname.begin());
       return true;
@@ -215,7 +230,7 @@ namespace llarp
   bool
   RouterContact::IsPublicRouter() const
   {
-    return addrs.size() > 0;
+    return !addrs.empty();
   }
 
   bool
@@ -236,7 +251,9 @@ namespace llarp
   bool
   RouterContact::IsExpired(llarp_time_t now) const
   {
-    return Age(now) >= Lifetime;
+    (void)now;
+    return false;
+    // return Age(now) >= Lifetime;
   }
 
   llarp_time_t
@@ -274,7 +291,9 @@ namespace llarp
     signature.Zero();
     last_updated = time_now_ms();
     if(!BEncode(&buf))
+    {
       return false;
+    }
     buf.sz  = buf.cur - buf.base;
     buf.cur = buf.base;
     return CryptoManager::instance()->sign(signature, secretkey, buf);
@@ -300,7 +319,7 @@ namespace llarp
     }
     for(const auto &a : addrs)
     {
-      if(IsBogon(a.ip) && !IgnoreBogons)
+      if(IsBogon(a.ip) && BlockBogons)
       {
         llarp::LogError("invalid address info: ", a);
         return false;
@@ -316,7 +335,7 @@ namespace llarp
     }
     if(!VerifySignature())
     {
-      llarp::LogError("invalid signature");
+      llarp::LogError("invalid signature: ", *this);
       return false;
     }
     return true;
@@ -346,17 +365,23 @@ namespace llarp
     std::array< byte_t, MAX_RC_SIZE > tmp;
     llarp_buffer_t buf(tmp);
     if(!BEncode(&buf))
+    {
       return false;
+    }
     buf.sz               = buf.cur - buf.base;
     buf.cur              = buf.base;
     const fs::path fpath = std::string(fname); /*  */
     auto optional_f =
         llarp::util::OpenFileStream< std::ofstream >(fpath, std::ios::binary);
     if(!optional_f)
+    {
       return false;
+    }
     auto &f = optional_f.value();
     if(!f.is_open())
+    {
       return false;
+    }
     f.write((char *)buf.base, buf.sz);
     return true;
   }
@@ -376,25 +401,12 @@ namespace llarp
     f.seekg(0, std::ios::end);
     auto l = f.tellg();
     if(l > static_cast< std::streamoff >(sizeof tmp))
+    {
       return false;
+    }
     f.seekg(0, std::ios::beg);
     f.read((char *)tmp.data(), l);
     return BDecode(&buf);
-  }
-
-  RouterContact &
-  RouterContact::operator=(const RouterContact &other)
-  {
-    addrs        = other.addrs;
-    exits        = other.exits;
-    signature    = other.signature;
-    last_updated = other.last_updated;
-    enckey       = other.enckey;
-    pubkey       = other.pubkey;
-    nickname     = other.nickname;
-    version      = other.version;
-    netID        = other.netID;
-    return *this;
   }
 
   std::ostream &

@@ -9,23 +9,16 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <wspiapi.h>
-
-#ifdef _MSC_VER
-#include <BaseTsd.h>
-typedef SSIZE_T ssize_t;
-#else
-#define ssize_t long
-#endif
-
 #else
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <net/net_if.hpp>
 #endif
 
 #include <memory>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdlib.h>
+
+#include <cstdint>
+#include <cstdlib>
 
 #if !defined(WIN32)
 #include <uv.h>
@@ -37,7 +30,7 @@ typedef SSIZE_T ssize_t;
  * event handler (cross platform high performance event system for IO)
  */
 
-#define EV_TICK_INTERVAL 100
+#define EV_TICK_INTERVAL 10
 
 // forward declare
 struct llarp_threadpool;
@@ -69,6 +62,10 @@ llarp_ev_loop_time_now_ms(const llarp_ev_loop_ptr &ev);
 void
 llarp_ev_loop_stop(const llarp_ev_loop_ptr &ev);
 
+/// list of packets we recv'd
+/// forward declared
+struct llarp_pkt_list;
+
 /// UDP handling configuration
 struct llarp_udp_io
 {
@@ -87,6 +84,11 @@ struct llarp_udp_io
   int (*sendto)(struct llarp_udp_io *, const struct sockaddr *, const byte_t *,
                 size_t);
 };
+
+/// get all packets recvieved last tick
+/// return true if we got packets return false if we didn't
+bool
+llarp_ev_udp_recvmany(struct llarp_udp_io *udp, struct llarp_pkt_list *pkts);
 
 /// add UDP handler
 int

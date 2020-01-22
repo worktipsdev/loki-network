@@ -4,7 +4,7 @@
 #include <path/path.hpp>
 #include <router_id.hpp>
 #include <util/bencode.hpp>
-#include <util/threading.hpp>
+#include <util/thread/threading.hpp>
 
 #include <absl/base/thread_annotations.h>
 #include <map>
@@ -76,6 +76,9 @@ namespace llarp
 
     void
     MarkPathSuccess(path::Path* p) LOCKS_EXCLUDED(m_ProfilesMutex);
+
+    void
+    MarkHopFail(const RouterID& r) LOCKS_EXCLUDED(m_ProfilesMutex);
 
     void
     ClearProfile(const RouterID& r) LOCKS_EXCLUDED(m_ProfilesMutex);

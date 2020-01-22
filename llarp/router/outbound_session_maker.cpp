@@ -5,11 +5,12 @@
 #include <nodedb.hpp>
 #include <router/i_rc_lookup_handler.hpp>
 #include <link/i_link_manager.hpp>
-#include <util/logic.hpp>
-#include <util/memfn.hpp>
-#include <util/threading.hpp>
+#include <util/meta/memfn.hpp>
+#include <util/thread/logic.hpp>
+#include <util/thread/threading.hpp>
 #include <util/status.hpp>
 #include <crypto/crypto.hpp>
+#include <utility>
 
 namespace llarp
 {
@@ -22,8 +23,8 @@ namespace llarp
 
     size_t attemptCount = 0;
 
-    PendingSession(const RouterContact &rc, LinkLayer_ptr link)
-        : rc(rc), link(link)
+    PendingSession(RouterContact _rc, LinkLayer_ptr _link)
+        : rc(std::move(_rc)), link(std::move(_link))
     {
     }
   };
@@ -117,29 +118,29 @@ namespace llarp
   }
 
   void
-  OutboundSessionMaker::ConnectToRandomRouters(int numDesired, llarp_time_t now)
+  OutboundSessionMaker::ConnectToRandomRouters(int numDesired)
   {
     int remainingDesired = numDesired;
+    std::set< RouterID > exclude;
+    do
+    {
+      RouterContact other;
+      if(not _nodedb->select_random_hop_excluding(other, exclude))
+        break;
 
-    _nodedb->visit([&](const RouterContact &other) -> bool {
-      // check if we really remainingDesired to
-      if(other.ExpiresSoon(now, 30000))  // TODO: make delta configurable
+      exclude.insert(other.pubkey);
+      if(not _rcLookup->RemoteIsAllowed(other.pubkey))
       {
-        return remainingDesired > 0;
+        continue;
       }
-      if(!_rcLookup->RemoteIsAllowed(other.pubkey))
-      {
-        return remainingDesired > 0;
-      }
-      if(randint() % 2 == 0
-         && !(_linkManager->HasSessionTo(other.pubkey)
-              || HavePendingSessionTo(other.pubkey)))
+      if(not(_linkManager->HasSessionTo(other.pubkey)
+             || HavePendingSessionTo(other.pubkey)))
       {
         CreateSessionTo(other, nullptr);
         --remainingDesired;
       }
-      return remainingDesired > 0;
-    });
+
+    } while(remainingDesired > 0);
     LogDebug("connecting to ", numDesired - remainingDesired, " out of ",
              numDesired, " random routers");
   }
@@ -155,7 +156,7 @@ namespace llarp
   void
   OutboundSessionMaker::Init(
       ILinkManager *linkManager, I_RCLookupHandler *rcLookup,
-      std::shared_ptr< Logic > logic, llarp_nodedb *nodedb,
+      Profiling *profiler, std::shared_ptr< Logic > logic, llarp_nodedb *nodedb,
       std::shared_ptr< llarp::thread::ThreadPool > threadpool)
   {
     _linkManager = linkManager;
@@ -163,6 +164,7 @@ namespace llarp
     _logic       = logic;
     _nodedb      = nodedb;
     _threadpool  = threadpool;
+    _profiler    = profiler;
   }
 
   void
@@ -192,7 +194,7 @@ namespace llarp
                                          const RouterContact &rc)
   {
     {
-      util::Lock l(&_mutex);
+      util::ReleasableLock l(&_mutex);
 
       // in case other request found RC for this router after this request was
       // made
@@ -206,6 +208,7 @@ namespace llarp
 
       if(!link)
       {
+        l.Release();
         FinalizeRequest(router, SessionResult::NoLink);
         return;
       }
@@ -214,9 +217,28 @@ namespace llarp
 
       itr->second = session;
     }
+    if(ShouldConnectTo(router))
+    {
+      auto fn = std::bind(&OutboundSessionMaker::DoEstablish, this, router);
+      LogicCall(_logic, fn);
+    }
+  }
 
-    auto fn = std::bind(&OutboundSessionMaker::DoEstablish, this, router);
-    _logic->queue_func(fn);
+  bool
+  OutboundSessionMaker::ShouldConnectTo(const RouterID &router) const
+  {
+    if(router == us)
+      return false;
+    size_t numPending = 0;
+    {
+      util::Lock lock(&_mutex);
+      if(pendingSessions.find(router) == pendingSessions.end())
+        numPending += pendingSessions.size();
+    }
+    if(_linkManager->HasSessionTo(router))
+      return false;
+    return _linkManager->NumberOfConnectedRouters() + numPending
+        < maxConnectedRouters;
   }
 
   void
@@ -291,7 +313,15 @@ namespace llarp
     {
       util::Lock l(&_mutex);
 
-      // TODO: Router profiling stuff
+      if(type == SessionResult::Establish)
+      {
+        _profiler->MarkConnectSuccess(router);
+      }
+      else
+      {
+        // TODO: add non timeout related fail case
+        _profiler->MarkConnectTimeout(router);
+      }
 
       auto itr = pendingCallbacks.find(router);
 
@@ -305,7 +335,7 @@ namespace llarp
     for(const auto &callback : movedCallbacks)
     {
       auto func = std::bind(callback, router, type);
-      _logic->queue_func(func);
+      LogicCall(_logic, func);
     }
 
     {

@@ -5,7 +5,7 @@
 #include <ev/ev.h>
 #include <net/net.hpp>
 #include <util/string_view.hpp>
-#include <util/logic.hpp>
+#include <util/thread/logic.hpp>
 
 #include <unordered_map>
 
@@ -16,9 +16,7 @@ namespace llarp
     /// handler of dns query hooking
     struct IQueryHandler
     {
-      virtual ~IQueryHandler()
-      {
-      }
+      virtual ~IQueryHandler() = default;
 
       /// return true if we should hook this message
       virtual bool
@@ -44,6 +42,8 @@ namespace llarp
       void
       Stop();
 
+      using Buffer_t = std::vector< uint8_t >;
+
      private:
       /// low level packet handler
       static void
@@ -61,10 +61,10 @@ namespace llarp
       Tick(llarp_time_t now);
 
       void
-      HandlePktClient(llarp::Addr from, llarp_buffer_t* buf);
+      HandlePktClient(llarp::Addr from, Buffer_t buf);
 
       void
-      HandlePktServer(llarp::Addr from, llarp_buffer_t* buf);
+      HandlePktServer(llarp::Addr from, Buffer_t buf);
 
       void
       SendClientMessageTo(llarp::Addr to, Message msg);

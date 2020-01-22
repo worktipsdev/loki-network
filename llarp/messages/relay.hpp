@@ -12,7 +12,6 @@ namespace llarp
 {
   struct RelayUpstreamMessage : public ILinkMessage
   {
-    PathID_t pathid;
     Encrypted< MAX_LINK_MSG_SIZE - 128 > X;
     TunnelNonce Y;
 
@@ -33,11 +32,15 @@ namespace llarp
     {
       return "RelayUpstream";
     }
+    uint16_t
+    Priority() const override
+    {
+      return 0;
+    }
   };
 
   struct RelayDownstreamMessage : public ILinkMessage
   {
-    PathID_t pathid;
     Encrypted< MAX_LINK_MSG_SIZE - 128 > X;
     TunnelNonce Y;
 
@@ -57,6 +60,12 @@ namespace llarp
     Name() const override
     {
       return "RelayDownstream";
+    }
+
+    uint16_t
+    Priority() const override
+    {
+      return 0;
     }
   };
 }  // namespace llarp

@@ -1,5 +1,7 @@
 #include <net/net.hpp>
 
+#include <net/net_if.hpp>
+
 #ifdef ANDROID
 #include <android/ifaddrs.h>
 #endif
@@ -9,12 +11,11 @@
 #ifndef ANDROID
 #include <ifaddrs.h>
 #endif
-#include <net/if.h>
 #endif
 
 #include <net/net_addr.hpp>
 #include <net/ip.hpp>
-#include <util/logger.hpp>
+#include <util/logging/logger.hpp>
 #include <util/str.hpp>
 
 #include <cstdio>
@@ -229,7 +230,7 @@ _llarp_nt_getadaptersinfo(struct llarp_nt_ifaddrs_t** ifap)
   struct _llarp_nt_ifaddrs_t* ifa =
       llarp_nt_new0(struct _llarp_nt_ifaddrs_t, n);
   struct _llarp_nt_ifaddrs_t* ift = ifa;
-
+  int val                         = 0;
   /* now populate list */
   for(pAdapter = pAdapterInfo; pAdapter; pAdapter = pAdapter->Next)
   {
@@ -242,9 +243,9 @@ _llarp_nt_getadaptersinfo(struct llarp_nt_ifaddrs_t** ifap)
 
       /* address */
       ift->_ifa.ifa_addr = (struct sockaddr*)&ift->_addr;
-      assert(1
-             == llarp_nt_sockaddr_pton(pIPAddr->IpAddress.String,
-                                       ift->_ifa.ifa_addr));
+      val =
+          llarp_nt_sockaddr_pton(pIPAddr->IpAddress.String, ift->_ifa.ifa_addr);
+      assert(1 == val);
 
       /* name */
 #ifdef DEBUG
@@ -261,9 +262,9 @@ _llarp_nt_getadaptersinfo(struct llarp_nt_ifaddrs_t** ifap)
 
       /* netmask */
       ift->_ifa.ifa_netmask = (sockaddr*)&ift->_netmask;
-      assert(1
-             == llarp_nt_sockaddr_pton(pIPAddr->IpMask.String,
-                                       ift->_ifa.ifa_netmask));
+      val =
+          llarp_nt_sockaddr_pton(pIPAddr->IpMask.String, ift->_ifa.ifa_netmask);
+      assert(1 == val);
 
       /* next */
       if(k++ < (n - 1))
@@ -786,7 +787,7 @@ llarp_getifaddr(const char* ifname, int af, struct sockaddr* addr)
         if(af == AF_INET6)
         {
           // set scope id
-          sockaddr_in6* ip6addr  = (sockaddr_in6*)addr;
+          auto* ip6addr          = (sockaddr_in6*)addr;
           ip6addr->sin6_scope_id = if_nametoindex(ifname);
           ip6addr->sin6_flowinfo = 0;
         }
@@ -861,19 +862,26 @@ namespace llarp
         const auto fam = i->ifa_addr->sa_family;
         if(fam != AF_INET)
           return;
-        sockaddr_in* addr = (sockaddr_in*)i->ifa_addr;
-        sockaddr_in* mask = (sockaddr_in*)i->ifa_netmask;
+        auto* addr = (sockaddr_in*)i->ifa_addr;
+        auto* mask = (sockaddr_in*)i->ifa_netmask;
         nuint32_t ifaddr{addr->sin_addr.s_addr};
         nuint32_t ifmask{mask->sin_addr.s_addr};
-        currentRanges.emplace_back(
-            IPRange{net::IPPacket::ExpandV4(xntohl(ifaddr)),
-                    net::IPPacket::ExpandV4(xntohl(ifmask))});
+#ifdef _WIN32
+        // do not delete, otherwise GCC will do horrible things to this lambda
+        LogDebug("found ", ifaddr, " with mask ", ifmask);
+#endif
+        if(addr->sin_addr.s_addr)
+          // skip unconfig'd adapters (windows passes these through the unix-y
+          // wrapper)
+          currentRanges.emplace_back(
+              IPRange{net::IPPacket::ExpandV4(xntohl(ifaddr)),
+                      net::IPPacket::ExpandV4(xntohl(ifmask))});
       }
     });
+    // try 10.x.0.0/16
     byte_t oct = 0;
     while(oct < 255)
     {
-      // TODO: check for range inbetween these
       const huint32_t loaddr = ipaddr_ipv4_bits(10, oct, 0, 1);
       const huint32_t hiaddr = ipaddr_ipv4_bits(10, oct, 255, 255);
       bool hit               = false;
@@ -885,6 +893,38 @@ namespace llarp
         return loaddr.ToString() + "/16";
       ++oct;
     }
+    // try 192.168.x.0/24
+    oct = 0;
+    while(oct < 255)
+    {
+      const huint32_t loaddr = ipaddr_ipv4_bits(192, 168, oct, 1);
+      const huint32_t hiaddr = ipaddr_ipv4_bits(192, 168, oct, 255);
+      bool hit               = false;
+      for(const auto& range : currentRanges)
+      {
+        hit = hit || range.ContainsV4(loaddr) || range.ContainsV4(hiaddr);
+      }
+      if(!hit)
+        return loaddr.ToString() + "/24";
+    }
+    // try 172.16.x.0/24
+    oct = 0;
+    while(oct < 255)
+    {
+      const huint32_t loaddr = ipaddr_ipv4_bits(172, 16, oct, 1);
+      const huint32_t hiaddr = ipaddr_ipv4_bits(172, 16, oct, 255);
+      bool hit               = false;
+      for(const auto& range : currentRanges)
+      {
+        hit = hit || range.ContainsV4(loaddr) || range.ContainsV4(hiaddr);
+      }
+      if(!hit)
+        return loaddr.ToString() + "/24";
+      ++oct;
+    }
+    LogError(
+        "cannot autodetect any free ip ranges on your system for use, please "
+        "configure this manually");
     return "";
   }
 
@@ -926,7 +966,7 @@ namespace llarp
   GetIFAddr(const std::string& ifname, Addr& addr, int af)
   {
     sockaddr_storage s;
-    sockaddr* sptr = (sockaddr*)&s;
+    auto* sptr = (sockaddr*)&s;
     if(!llarp_getifaddr(ifname.c_str(), af, sptr))
       return false;
     addr = *sptr;
@@ -987,12 +1027,58 @@ namespace llarp
     return Contains(net::IPPacket::ExpandV4(ip));
   }
 
+  bool
+  IPRange::FromString(std::string str)
+  {
+    const auto colinpos = str.find(":");
+    const auto slashpos = str.find("/");
+    std::string bitsstr;
+    if(slashpos != std::string::npos)
+    {
+      bitsstr = str.substr(slashpos + 1);
+      str     = str.substr(0, slashpos);
+    }
+    if(colinpos == std::string::npos)
+    {
+      huint32_t ip;
+      if(!ip.FromString(str))
+        return false;
+      addr = net::IPPacket::ExpandV4(ip);
+      if(!bitsstr.empty())
+      {
+        auto bits = atoi(bitsstr.c_str());
+        if(bits < 0 || bits > 32)
+          return false;
+        netmask_bits = netmask_ipv6_bits(96 + bits);
+      }
+      else
+        netmask_bits = netmask_ipv6_bits(128);
+    }
+    else
+    {
+      if(!addr.FromString(str))
+        return false;
+      if(!bitsstr.empty())
+      {
+        auto bits = atoi(bitsstr.c_str());
+        if(bits < 0 || bits > 128)
+          return false;
+        netmask_bits = netmask_ipv6_bits(bits);
+      }
+      else
+      {
+        netmask_bits = netmask_ipv6_bits(128);
+      }
+    }
+    return true;
+  }
+
   std::string
   IPRange::ToString() const
   {
     char buf[INET6_ADDRSTRLEN + 1] = {0};
     std::string str;
-    in6_addr inaddr;
+    in6_addr inaddr    = {};
     size_t numset      = 0;
     absl::uint128 bits = netmask_bits.h;
     while(bits)

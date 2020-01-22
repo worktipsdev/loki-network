@@ -5,6 +5,7 @@
 #include <path/path_context.hpp>
 #include <router/abstractrouter.hpp>
 #include <util/str.hpp>
+#include <util/bits.hpp>
 
 #include <cassert>
 
@@ -15,13 +16,20 @@ namespace llarp
     static void
     ExitHandlerRecvPkt(llarp_tun_io *tun, const llarp_buffer_t &buf)
     {
-      static_cast< ExitEndpoint * >(tun->user)->OnInetPacket(buf);
+      std::vector< byte_t > pkt;
+      pkt.resize(buf.sz);
+      std::copy_n(buf.base, buf.sz, pkt.data());
+      auto self = static_cast< ExitEndpoint * >(tun->user);
+      LogicCall(self->GetRouter()->logic(), [self, pktbuf = std::move(pkt)]() {
+        self->OnInetPacket(std::move(pktbuf));
+      });
     }
 
     static void
     ExitHandlerFlush(llarp_tun_io *tun)
     {
-      static_cast< ExitEndpoint * >(tun->user)->Flush();
+      auto *ep = static_cast< ExitEndpoint * >(tun->user);
+      LogicCall(ep->GetRouter()->logic(), std::bind(&ExitEndpoint::Flush, ep));
     }
 
     ExitEndpoint::ExitEndpoint(const std::string &name, AbstractRouter *r)
@@ -29,7 +37,8 @@ namespace llarp
         , m_Resolver(std::make_shared< dns::Proxy >(
               r->netloop(), r->logic(), r->netloop(), r->logic(), this))
         , m_Name(name)
-        , m_Tun{{0}, 0, {0}, 0, 0, 0, 0, 0, 0, 0, 0}
+        , m_Tun{{0},     0,       {0},     nullptr, nullptr, nullptr,
+                nullptr, nullptr, nullptr, nullptr, nullptr}
         , m_LocalResolverAddr("127.0.0.1", 53)
         , m_InetToNetwork(name + "_exit_rx", r->netloop(), r->netloop())
 
@@ -40,9 +49,7 @@ namespace llarp
       m_ShouldInitTun = true;
     }
 
-    ExitEndpoint::~ExitEndpoint()
-    {
-    }
+    ExitEndpoint::~ExitEndpoint() = default;
 
     util::StatusObject
     ExitEndpoint::ExtractStatus() const
@@ -52,9 +59,9 @@ namespace llarp
       util::StatusObject exitsObj{};
       for(const auto &item : m_ActiveExits)
       {
-        exitsObj.Put(item.first.ToHex(), item.second->ExtractStatus());
+        exitsObj[item.first.ToString()] = item.second->ExtractStatus();
       }
-      obj.Put("exits", exitsObj);
+      obj["exits"] = exitsObj;
       return obj;
     }
 
@@ -242,12 +249,12 @@ namespace llarp
       m_InetToNetwork.Process([&](Pkt_t &pkt) {
         PubKey pk;
         {
-          auto itr = m_IPToKey.find(net::IPPacket::ExpandV4(pkt.dstv4()));
+          auto itr = m_IPToKey.find(pkt.dstv6());
           if(itr == m_IPToKey.end())
           {
             // drop
             LogWarn(Name(), " dropping packet, has no session at ",
-                    pkt.dstv4());
+                    pkt.dstv6());
             return;
           }
           pk = itr->second;
@@ -456,10 +463,13 @@ namespace llarp
     }
 
     void
-    ExitEndpoint::OnInetPacket(const llarp_buffer_t &buf)
+    ExitEndpoint::OnInetPacket(std::vector< byte_t > buf)
     {
+      const llarp_buffer_t buffer(buf);
       m_InetToNetwork.EmplaceIf(
-          [b = ManagedBuffer(buf)](Pkt_t &pkt) -> bool { return pkt.Load(b); });
+          [b = ManagedBuffer(buffer)](Pkt_t &pkt) -> bool {
+            return pkt.Load(b);
+          });
     }
 
     bool
@@ -469,7 +479,11 @@ namespace llarp
       if(!pkt.Load(buf))
         return false;
       // rewrite ip
-      pkt.UpdateIPv6Address(from, m_IfAddr);
+      if(m_UseV6)
+        pkt.UpdateIPv6Address(from, m_IfAddr);
+      else
+        pkt.UpdateIPv4Address(xhtonl(net::IPPacket::TruncateV6(from)),
+                              xhtonl(net::IPPacket::TruncateV6(m_IfAddr)));
       return llarp_ev_tun_async_write(&m_Tun, pkt.Buffer());
     }
 
@@ -548,6 +562,11 @@ namespace llarp
       }
       if(k == "ifaddr")
       {
+        if(!m_OurRange.FromString(v))
+        {
+          LogError(Name(), " has invalid address range: ", v);
+          return false;
+        }
         auto pos = v.find("/");
         if(pos == std::string::npos)
         {
@@ -559,28 +578,12 @@ namespace llarp
         // string, or just a plain char array?
         strncpy(m_Tun.ifaddr, host_str.c_str(), sizeof(m_Tun.ifaddr) - 1);
         m_Tun.netmask = std::atoi(nmask_str.c_str());
-
-        huint32_t ip;
-        if(ip.FromString(host_str))
-        {
-          m_IfAddr                = net::IPPacket::ExpandV4(ip);
-          m_OurRange.netmask_bits = netmask_ipv6_bits(m_Tun.netmask + 96);
-        }
-        else if(m_IfAddr.FromString(host_str))
-        {
-          m_UseV6                 = true;
-          m_OurRange.netmask_bits = netmask_ipv6_bits(m_Tun.netmask);
-        }
-        else
-        {
-          LogError(Name(), " invalid ifaddr: ", v);
-          return false;
-        }
-        m_OurRange.addr = m_IfAddr;
-        m_NextAddr      = m_IfAddr;
-        m_HigestAddr    = m_IfAddr | (~m_OurRange.netmask_bits);
+        m_IfAddr      = m_OurRange.addr;
+        m_NextAddr    = m_IfAddr;
+        m_HigestAddr  = m_OurRange.HighestAddr();
         LogInfo(Name(), " set ifaddr range to ", m_Tun.ifaddr, "/",
                 m_Tun.netmask, " lo=", m_IfAddr, " hi=", m_HigestAddr);
+        m_UseV6 = false;
       }
       if(k == "ifname")
       {

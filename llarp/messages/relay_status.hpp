@@ -9,6 +9,7 @@
 
 #include <array>
 #include <memory>
+#include <utility>
 
 namespace llarp
 {
@@ -22,7 +23,7 @@ namespace llarp
 
   struct LR_StatusRecord
   {
-    static constexpr uint64_t SUCCESS               = 1;
+    static constexpr uint64_t SUCCESS               = 1 << 0;
     static constexpr uint64_t FAIL_TIMEOUT          = 1 << 1;
     static constexpr uint64_t FAIL_CONGESTION       = 1 << 2;
     static constexpr uint64_t FAIL_DEST_UNKNOWN     = 1 << 3;
@@ -30,6 +31,7 @@ namespace llarp
     static constexpr uint64_t FAIL_MALFORMED_RECORD = 1 << 5;
     static constexpr uint64_t FAIL_DEST_INVALID     = 1 << 6;
     static constexpr uint64_t FAIL_CANNOT_CONNECT   = 1 << 7;
+    static constexpr uint64_t FAIL_DUPLICATE_HOP    = 1 << 8;
 
     uint64_t status  = 0;
     uint64_t version = 0;
@@ -56,14 +58,14 @@ namespace llarp
 
     uint64_t status = 0;
 
-    LR_StatusMessage(const std::array< EncryptedFrame, 8 > &_frames)
-        : ILinkMessage(), frames(_frames)
+    LR_StatusMessage(std::array< EncryptedFrame, 8 > _frames)
+        : ILinkMessage(), frames(std::move(_frames))
     {
     }
 
     LR_StatusMessage() = default;
 
-    ~LR_StatusMessage() = default;
+    ~LR_StatusMessage() override = default;
 
     void
     Clear() override;
@@ -86,7 +88,7 @@ namespace llarp
                   uint64_t status);
 
     bool
-    AddFrame(const SharedSecret &pathKey, uint64_t status);
+    AddFrame(const SharedSecret &pathKey, uint64_t newStatus);
 
     static void
     QueueSendMessage(AbstractRouter *router, const RouterID nextHop,
@@ -100,6 +102,11 @@ namespace llarp
     Name() const override
     {
       return "RelayStatus";
+    }
+    virtual uint16_t
+    Priority() const override
+    {
+      return 6;
     }
   };
 }  // namespace llarp

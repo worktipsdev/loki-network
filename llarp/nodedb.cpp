@@ -5,19 +5,20 @@
 #include <util/buffer.hpp>
 #include <util/encode.hpp>
 #include <util/fs.hpp>
-#include <util/logger.hpp>
-#include <util/logic.hpp>
+#include <util/logging/logger.hpp>
 #include <util/mem.hpp>
-#include <util/thread_pool.hpp>
+#include <util/thread/logic.hpp>
+#include <util/thread/thread_pool.hpp>
 
 #include <fstream>
 #include <unordered_map>
+#include <utility>
 
 static const char skiplist_subdirs[] = "0123456789abcdef";
 static const std::string RC_FILE_EXT = ".signed";
 
-llarp_nodedb::NetDBEntry::NetDBEntry(const llarp::RouterContact &value)
-    : rc(value), inserted(llarp::time_now_ms())
+llarp_nodedb::NetDBEntry::NetDBEntry(llarp::RouterContact value)
+    : rc(std::move(value)), inserted(llarp::time_now_ms())
 {
 }
 
@@ -112,31 +113,18 @@ llarp_nodedb::getRCFilePath(const llarp::RouterID &pubkey) const
   return filepath.string();
 }
 
-static void
-handle_async_insert_rc(llarp_nodedb *nodedb, const llarp::RouterContact &rc,
-                       std::shared_ptr< llarp::Logic > logic,
-                       const std::function< void(void) > &completedHook)
-{
-  nodedb->Insert(rc);
-  if(logic && completedHook)
-  {
-    logic->queue_func(completedHook);
-  }
-}
-
 void
 llarp_nodedb::InsertAsync(llarp::RouterContact rc,
                           std::shared_ptr< llarp::Logic > logic,
                           std::function< void(void) > completionHandler)
 {
-  const auto job =
-      std::bind(&handle_async_insert_rc, this, rc, logic, completionHandler);
-  size_t tries = 10;
-  while((!disk->addJob(job)) && tries-- > 0)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  // on fail do synchronous write
-  if(tries == 0)
-    Insert(rc);
+  disk->addJob([this, rc, logic, completionHandler]() {
+    this->Insert(rc);
+    if(logic && completionHandler)
+    {
+      LogicCall(logic, completionHandler);
+    }
+  });
 }
 
 bool
@@ -151,7 +139,7 @@ llarp_nodedb::UpdateAsyncIfNewer(llarp::RouterContact rc,
     InsertAsync(rc, logic, completionHandler);
     return true;
   }
-  else if(itr != entries.end())
+  if(itr != entries.end())
   {
     // insertion time is set on...insertion.  But it should be updated here
     // even if there is no insertion of a new RC, to show that the existing one
@@ -161,44 +149,17 @@ llarp_nodedb::UpdateAsyncIfNewer(llarp::RouterContact rc,
   return false;
 }
 
-/// insert and write to disk
+/// insert
 bool
 llarp_nodedb::Insert(const llarp::RouterContact &rc)
 {
-  std::array< byte_t, MAX_RC_SIZE > tmp;
-  llarp_buffer_t buf(tmp);
-
-  if(!rc.BEncode(&buf))
-    return false;
-
-  buf.sz        = buf.cur - buf.base;
-  auto filepath = getRCFilePath(rc.pubkey);
-  llarp::LogDebug("saving RC.pubkey ", filepath);
-  auto optional_ofs = llarp::util::OpenFileStream< std::ofstream >(
-      filepath,
-      std::ofstream::out | std::ofstream::binary | std::ofstream::trunc);
-  if(!optional_ofs)
-    return false;
-  auto &ofs = optional_ofs.value();
-  ofs.write((char *)buf.base, buf.sz);
-  ofs.flush();
-  ofs.close();
-  if(!ofs)
-  {
-    llarp::LogError("Failed to write: ", filepath);
-    return false;
-  }
-  llarp::LogDebug("saved RC.pubkey: ", filepath);
-  // save rc after writing to disk
-  {
-    llarp::util::Lock lock(&access);
-    auto itr = entries.find(rc.pubkey.as_array());
-    if(itr != entries.end())
-      entries.erase(itr);
-    entries.emplace(rc.pubkey.as_array(), rc);
-    LogInfo("Added or updated RC for ", llarp::RouterID(rc.pubkey),
-            " to nodedb.  Current nodedb count is: ", entries.size());
-  }
+  llarp::util::Lock lock(&access);
+  auto itr = entries.find(rc.pubkey.as_array());
+  if(itr != entries.end())
+    entries.erase(itr);
+  entries.emplace(rc.pubkey.as_array(), rc);
+  LogDebug("Added or updated RC for ", llarp::RouterID(rc.pubkey),
+           " to nodedb.  Current nodedb count is: ", entries.size());
   return true;
 }
 
@@ -224,6 +185,7 @@ llarp_nodedb::Load(const fs::path &path)
     if(l > 0)
       loaded += l;
   }
+  m_NextSaveToDisk = llarp::time_now_ms() + m_SaveInterval;
   return loaded;
 }
 
@@ -253,10 +215,19 @@ llarp_nodedb::SaveAll()
   }
 }
 
+bool
+llarp_nodedb::ShouldSaveToDisk(llarp_time_t now) const
+{
+  if(now == 0)
+    now = llarp::time_now_ms();
+  return m_NextSaveToDisk > 0 && m_NextSaveToDisk <= now;
+}
+
 void
 llarp_nodedb::AsyncFlushToDisk()
 {
   disk->addJob(std::bind(&llarp_nodedb::SaveAll, this));
+  m_NextSaveToDisk = llarp::time_now_ms() + m_SaveInterval;
 }
 
 ssize_t
@@ -362,8 +333,7 @@ llarp_nodedb::Save()
 void
 logic_threadworker_callback(void *user)
 {
-  llarp_async_verify_rc *verify_request =
-      static_cast< llarp_async_verify_rc * >(user);
+  auto *verify_request = static_cast< llarp_async_verify_rc * >(user);
   if(verify_request->hook)
     verify_request->hook(verify_request);
 }
@@ -382,36 +352,42 @@ disk_threadworker_setRC(llarp_async_verify_rc *verify_request)
 void
 crypto_threadworker_verifyrc(void *user)
 {
-  llarp_async_verify_rc *verify_request =
-      static_cast< llarp_async_verify_rc * >(user);
+  auto *verify_request    = static_cast< llarp_async_verify_rc * >(user);
   llarp::RouterContact rc = verify_request->rc;
   verify_request->valid   = rc.Verify(llarp::time_now_ms());
   // if it's valid we need to set it
   if(verify_request->valid && rc.IsPublicRouter())
   {
-    llarp::LogDebug("RC is valid, saving to disk");
-    verify_request->diskworker->addJob(
-        std::bind(&disk_threadworker_setRC, verify_request));
+    if(verify_request->diskworker)
+    {
+      llarp::LogDebug("RC is valid, saving to disk");
+      verify_request->diskworker->addJob(
+          std::bind(&disk_threadworker_setRC, verify_request));
+      return;
+    }
   }
-  else
-  {
-    // callback to logic thread
-    verify_request->logic->queue_job(
-        {verify_request, &logic_threadworker_callback});
-  }
+  // callback to logic thread
+  verify_request->logic->queue_job(
+      {verify_request, &logic_threadworker_callback});
 }
 
 void
 nodedb_inform_load_rc(void *user)
 {
-  llarp_async_load_rc *job = static_cast< llarp_async_load_rc * >(user);
+  auto *job = static_cast< llarp_async_load_rc * >(user);
   job->hook(job);
+}
+
+void
+llarp_nodedb_async_verify(struct llarp_async_verify_rc *job)
+{
+  job->cryptoworker->addJob(std::bind(&crypto_threadworker_verifyrc, job));
 }
 
 void
 nodedb_async_load_rc(void *user)
 {
-  llarp_async_load_rc *job = static_cast< llarp_async_load_rc * >(user);
+  auto *job = static_cast< llarp_async_load_rc * >(user);
 
   auto fpath  = job->nodedb->getRCFilePath(job->pubkey);
   job->loaded = job->nodedb->loadfile(fpath);
@@ -454,42 +430,11 @@ llarp_nodedb::ensure_dir(const char *dir)
   return true;
 }
 
-void
-llarp_nodedb::set_dir(const char *dir)
-{
-  nodePath = dir;
-}
-
 ssize_t
-llarp_nodedb::load_dir(const char *dir)
+llarp_nodedb::LoadAll()
 {
-  std::error_code ec;
-  if(!fs::exists(dir, ec))
-  {
-    return -1;
-  }
-  set_dir(dir);
-  return Load(dir);
+  return Load(nodePath.c_str());
 }
-
-/// maybe rename to verify_and_set
-void
-llarp_nodedb_async_verify(struct llarp_async_verify_rc *job)
-{
-  // switch to crypto threadpool and continue with
-  // crypto_threadworker_verifyrc
-  job->cryptoworker->addJob(std::bind(&crypto_threadworker_verifyrc, job));
-}
-
-// disabled for now
-/*
-void
-llarp_nodedb_async_load_rc(struct llarp_async_load_rc *job)
-{
-  // call in the disk io thread so we don't bog down the others
-  llarp_threadpool_queue_job(job->diskworker, {job, &nodedb_async_load_rc});
-}
-*/
 
 size_t
 llarp_nodedb::num_loaded() const

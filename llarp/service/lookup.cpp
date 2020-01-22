@@ -3,7 +3,8 @@
 #include <path/path.hpp>
 #include <util/time.hpp>
 #include <router/abstractrouter.hpp>
-#include <util/logic.hpp>
+#include <util/thread/logic.hpp>
+#include <utility>
 
 namespace llarp
 {
@@ -11,9 +12,8 @@ namespace llarp
 
   namespace service
   {
-    IServiceLookup::IServiceLookup(ILookupHolder *p, uint64_t tx,
-                                   const std::string &n)
-        : parent(p), txid(tx), name(n)
+    IServiceLookup::IServiceLookup(ILookupHolder *p, uint64_t tx, std::string n)
+        : m_parent(p), txid(tx), name(std::move(n))
     {
       m_created = time_now_ms();
       p->PutLookup(this, tx);
@@ -26,7 +26,7 @@ namespace llarp
       if(!msg)
         return false;
       endpoint = path->Endpoint();
-      r->logic()->queue_func([=]() { path->SendRoutingMessage(*msg, r); });
+      LogicCall(r->logic(), [=]() { path->SendRoutingMessage(*msg, r); });
       return true;
     }
   }  // namespace service

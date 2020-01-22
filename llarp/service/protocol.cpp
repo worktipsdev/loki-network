@@ -2,9 +2,11 @@
 #include <path/path.hpp>
 #include <routing/handler.hpp>
 #include <util/buffer.hpp>
-#include <util/logic.hpp>
 #include <util/mem.hpp>
-#include <util/memfn.hpp>
+#include <util/meta/memfn.hpp>
+#include <util/thread/logic.hpp>
+
+#include <utility>
 
 namespace llarp
 {
@@ -19,9 +21,7 @@ namespace llarp
     {
     }
 
-    ProtocolMessage::~ProtocolMessage()
-    {
-    }
+    ProtocolMessage::~ProtocolMessage() = default;
 
     void
     ProtocolMessage::PutBuffer(const llarp_buffer_t& buf)
@@ -92,9 +92,7 @@ namespace llarp
       return bencode_end(buf);
     }
 
-    ProtocolFrame::~ProtocolFrame()
-    {
-    }
+    ProtocolFrame::~ProtocolFrame() = default;
 
     bool
     ProtocolFrame::BEncode(llarp_buffer_t* buf) const
@@ -165,8 +163,8 @@ namespace llarp
         return false;
       if(!BEncodeMaybeReadDictEntry("T", T, read, key, val))
         return false;
-      if(!BEncodeMaybeReadVersion("V", version, LLARP_PROTO_VERSION, read, key,
-                                  val))
+      if(!BEncodeMaybeVerifyVersion("V", version, LLARP_PROTO_VERSION, read,
+                                    key, val))
         return false;
       if(!BEncodeMaybeReadDictEntry("Z", Z, read, key, val))
         return false;
@@ -255,11 +253,10 @@ namespace llarp
       const Introduction fromIntro;
 
       AsyncFrameDecrypt(std::shared_ptr< Logic > l, const Identity& localIdent,
-                        IDataHandler* h,
-                        const std::shared_ptr< ProtocolMessage >& m,
+                        IDataHandler* h, std::shared_ptr< ProtocolMessage > m,
                         const ProtocolFrame& f, const Introduction& recvIntro)
-          : logic(l)
-          , msg(m)
+          : logic(std::move(l))
+          , msg(std::move(m))
           , m_LocalIdentity(localIdent)
           , handler(h)
           , frame(f)
@@ -270,8 +267,8 @@ namespace llarp
       static void
       Work(void* user)
       {
-        AsyncFrameDecrypt* self = static_cast< AsyncFrameDecrypt* >(user);
-        auto crypto             = CryptoManager::instance();
+        auto* self  = static_cast< AsyncFrameDecrypt* >(user);
+        auto crypto = CryptoManager::instance();
         SharedSecret K;
         SharedSecret sharedKey;
         // copy
@@ -346,8 +343,8 @@ namespace llarp
         std::shared_ptr< ProtocolMessage > msg = std::move(self->msg);
         path::Path_ptr path                    = std::move(self->path);
         const PathID_t from                    = self->frame.F;
-        self->logic->queue_func(
-            [=]() { ProtocolMessage::ProcessAsync(path, from, msg); });
+        LogicCall(self->logic,
+                  [=]() { ProtocolMessage::ProcessAsync(path, from, msg); });
         delete self;
       }
     };
@@ -367,13 +364,21 @@ namespace llarp
       return *this;
     }
 
+    struct AsyncDecrypt
+    {
+      ServiceInfo si;
+      SharedSecret shared;
+      ProtocolFrame frame;
+    };
+
     bool
     ProtocolFrame::AsyncDecryptAndVerify(
         std::shared_ptr< Logic > logic, path::Path_ptr recvPath,
         const std::shared_ptr< llarp::thread::ThreadPool >& worker,
         const Identity& localIdent, IDataHandler* handler) const
     {
-      auto msg = std::make_shared< ProtocolMessage >();
+      auto msg     = std::make_shared< ProtocolMessage >();
+      msg->handler = handler;
       if(T.IsZero())
       {
         LogInfo("Got protocol frame with new convo");
@@ -383,33 +388,44 @@ namespace llarp
         dh->path = recvPath;
         return worker->addJob(std::bind(&AsyncFrameDecrypt::Work, dh));
       }
-      SharedSecret shared;
-      if(!handler->GetCachedSessionKeyFor(T, shared))
+
+      auto v = new AsyncDecrypt();
+
+      if(!handler->GetCachedSessionKeyFor(T, v->shared))
       {
         LogError("No cached session for T=", T);
+        delete v;
         return false;
       }
-      ServiceInfo si;
-      if(!handler->GetSenderFor(T, si))
+
+      if(!handler->GetSenderFor(T, v->si))
       {
         LogError("No sender for T=", T);
+        delete v;
         return false;
       }
-      if(!Verify(si))
-      {
-        LogError("Signature failure from ", si.Addr());
-        return false;
-      }
-      if(!DecryptPayloadInto(shared, *msg))
-      {
-        LogError("failed to decrypt message");
-        return false;
-      }
-      msg->handler        = handler;
-      const PathID_t from = F;
-      logic->queue_func(
-          [=]() { ProtocolMessage::ProcessAsync(recvPath, from, msg); });
-      return true;
+      v->frame = *this;
+      return worker->addJob(
+          [v, msg = std::move(msg), recvPath = std::move(recvPath)]() {
+            if(not v->frame.Verify(v->si))
+            {
+              LogError("Signature failure from ", v->si.Addr());
+              delete v;
+              return;
+            }
+            if(not v->frame.DecryptPayloadInto(v->shared, *msg))
+            {
+              LogError("failed to decrypt message");
+              delete v;
+              return;
+            }
+            RecvDataEvent ev;
+            ev.fromPath = std::move(recvPath);
+            ev.pathid   = v->frame.F;
+            ev.msg      = std::move(msg);
+            msg->handler->QueueRecvData(std::move(ev));
+            delete v;
+          });
     }
 
     bool
@@ -420,7 +436,7 @@ namespace llarp
     }
 
     bool
-    ProtocolFrame::Verify(const ServiceInfo& from) const
+    ProtocolFrame::Verify(const ServiceInfo& svc) const
     {
       ProtocolFrame copy(*this);
       // save signature
@@ -439,7 +455,7 @@ namespace llarp
       buf.sz  = buf.cur - buf.base;
       buf.cur = buf.base;
       // verify
-      return from.Verify(buf, Z);
+      return svc.Verify(buf, Z);
     }
 
     bool

@@ -4,7 +4,7 @@
 #include <router/i_outbound_session_maker.hpp>
 #include <link/i_link_manager.hpp>
 #include <constants/link_layer.hpp>
-#include <util/memfn.hpp>
+#include <util/meta/memfn.hpp>
 #include <util/status.hpp>
 
 #include <algorithm>
@@ -12,11 +12,19 @@
 
 namespace llarp
 {
+  const PathID_t OutboundMessageHandler::zeroID;
+
+  OutboundMessageHandler::OutboundMessageHandler(size_t maxQueueSize)
+      : outboundQueue(maxQueueSize), removedPaths(20), removedSomePaths(false)
+  {
+  }
+
   bool
   OutboundMessageHandler::QueueMessage(const RouterID &remote,
                                        const ILinkMessage *msg,
                                        SendStatusHandler callback)
   {
+    const uint16_t priority = msg->Priority();
     std::array< byte_t, MAX_LINK_MSG_SIZE > linkmsg_buffer;
     llarp_buffer_t buf(linkmsg_buffer);
 
@@ -31,8 +39,9 @@ namespace llarp
 
     std::copy_n(buf.base, buf.sz, message.first.data());
 
-    if(SendIfSession(remote, message))
+    if(_linkManager->HasSessionTo(remote))
     {
+      QueueOutboundMessage(remote, std::move(message), msg->pathid, priority);
       return true;
     }
 
@@ -41,9 +50,14 @@ namespace llarp
       util::Lock l(&_mutex);
 
       // create queue for <remote> if it doesn't exist, and get iterator
-      auto itr_pair = outboundMessageQueue.emplace(remote, MessageQueue());
+      auto itr_pair =
+          pendingSessionMessageQueues.emplace(remote, MessageQueue());
 
-      itr_pair.first->second.push_back(std::move(message));
+      MessageQueueEntry entry;
+      entry.priority = priority;
+      entry.message  = message;
+      entry.router   = remote;
+      itr_pair.first->second.push(std::move(entry));
 
       shouldCreateSession = itr_pair.second;
     }
@@ -56,11 +70,35 @@ namespace llarp
     return true;
   }
 
+  void
+  OutboundMessageHandler::Tick()
+  {
+    m_Killer.TryAccess([self = this]() {
+      self->ProcessOutboundQueue();
+      self->RemoveEmptyPathQueues();
+      self->SendRoundRobin();
+    });
+  }
+
+  void
+  OutboundMessageHandler::QueueRemoveEmptyPath(const PathID_t &pathid)
+  {
+    m_Killer.TryAccess(
+        [self = this, pathid]() { self->removedPaths.pushBack(pathid); });
+  }
+
   // TODO: this
   util::StatusObject
   OutboundMessageHandler::ExtractStatus() const
   {
-    util::StatusObject status{};
+    util::StatusObject status{"queueStats",
+                              {{"queued", m_queueStats.queued},
+                               {"dropped", m_queueStats.dropped},
+                               {"sent", m_queueStats.sent},
+                               {"queueWatermark", m_queueStats.queueWatermark},
+                               {"perTickMax", m_queueStats.perTickMax},
+                               {"numTicks", m_queueStats.numTicks}}};
+
     return status;
   }
 
@@ -70,36 +108,38 @@ namespace llarp
   {
     _linkManager = linkManager;
     _logic       = logic;
+
+    outboundMessageQueues.emplace(zeroID, MessageQueue());
   }
 
   void
   OutboundMessageHandler::OnSessionEstablished(const RouterID &router)
   {
-    FinalizeRequest(router, SendStatus::Success);
+    FinalizeSessionRequest(router, SendStatus::Success);
   }
 
   void
   OutboundMessageHandler::OnConnectTimeout(const RouterID &router)
   {
-    FinalizeRequest(router, SendStatus::Timeout);
+    FinalizeSessionRequest(router, SendStatus::Timeout);
   }
 
   void
   OutboundMessageHandler::OnRouterNotFound(const RouterID &router)
   {
-    FinalizeRequest(router, SendStatus::RouterNotFound);
+    FinalizeSessionRequest(router, SendStatus::RouterNotFound);
   }
 
   void
   OutboundMessageHandler::OnInvalidRouter(const RouterID &router)
   {
-    FinalizeRequest(router, SendStatus::InvalidRouter);
+    FinalizeSessionRequest(router, SendStatus::InvalidRouter);
   }
 
   void
   OutboundMessageHandler::OnNoLink(const RouterID &router)
   {
-    FinalizeRequest(router, SendStatus::NoLink);
+    FinalizeSessionRequest(router, SendStatus::NoLink);
   }
 
   void
@@ -136,8 +176,8 @@ namespace llarp
   {
     if(callback)
     {
-      auto func = std::bind(callback, status);
-      _logic->queue_func(func);
+      auto f = std::bind(callback, status);
+      LogicCall(_logic, [self = this, f]() { self->m_Killer.TryAccess(f); });
     }
   }
 
@@ -170,18 +210,14 @@ namespace llarp
   {
     const llarp_buffer_t buf(msg.first);
     auto callback = msg.second;
-    if(!_linkManager->SendTo(
-           remote, buf, [=](ILinkSession::DeliveryStatus status) {
-             if(status == ILinkSession::DeliveryStatus::eDeliverySuccess)
-               DoCallback(callback, SendStatus::Success);
-             else
-               DoCallback(callback, SendStatus::Congestion);
-           }))
-    {
-      DoCallback(callback, SendStatus::Congestion);
-      return false;
-    }
-    return true;
+    m_queueStats.sent++;
+    return _linkManager->SendTo(
+        remote, buf, [=](ILinkSession::DeliveryStatus status) {
+          if(status == ILinkSession::DeliveryStatus::eDeliverySuccess)
+            DoCallback(callback, SendStatus::Success);
+          else
+            DoCallback(callback, SendStatus::Congestion);
+        });
   }
 
   bool
@@ -195,35 +231,189 @@ namespace llarp
     return false;
   }
 
+  bool
+  OutboundMessageHandler::QueueOutboundMessage(const RouterID &remote,
+                                               Message &&msg,
+                                               const PathID_t &pathid,
+                                               uint16_t priority)
+  {
+    MessageQueueEntry entry;
+    entry.message      = std::move(msg);
+    auto callback_copy = entry.message.second;
+    entry.router       = remote;
+    entry.pathid       = pathid;
+    entry.priority     = priority;
+    if(outboundQueue.tryPushBack(std::move(entry))
+       != llarp::thread::QueueReturn::Success)
+    {
+      m_queueStats.dropped++;
+      DoCallback(callback_copy, SendStatus::Congestion);
+    }
+    else
+    {
+      m_queueStats.queued++;
+
+      uint32_t queueSize = outboundQueue.size();
+      m_queueStats.queueWatermark =
+          std::max(queueSize, m_queueStats.queueWatermark);
+    }
+
+    return true;
+  }
+
   void
-  OutboundMessageHandler::FinalizeRequest(const RouterID &router,
-                                          SendStatus status)
+  OutboundMessageHandler::ProcessOutboundQueue()
+  {
+    while(not outboundQueue.empty())
+    {
+      // TODO: can we add util::thread::Queue::front() for move semantics here?
+      MessageQueueEntry entry = outboundQueue.popFront();
+
+      auto itr_pair =
+          outboundMessageQueues.emplace(entry.pathid, MessageQueue());
+
+      if(itr_pair.second && !entry.pathid.IsZero())
+      {
+        roundRobinOrder.push(entry.pathid);
+      }
+
+      MessageQueue &path_queue = itr_pair.first->second;
+
+      if(path_queue.size() < MAX_PATH_QUEUE_SIZE)
+      {
+        path_queue.push(std::move(entry));
+      }
+      else
+      {
+        DoCallback(entry.message.second, SendStatus::Congestion);
+        m_queueStats.dropped++;
+      }
+    }
+  }
+
+  void
+  OutboundMessageHandler::RemoveEmptyPathQueues()
+  {
+    removedSomePaths = false;
+    if(removedPaths.empty())
+      return;
+
+    while(not removedPaths.empty())
+    {
+      auto itr = outboundMessageQueues.find(removedPaths.popFront());
+      if(itr != outboundMessageQueues.end())
+      {
+        outboundMessageQueues.erase(itr);
+      }
+    }
+    removedSomePaths = true;
+  }
+
+  void
+  OutboundMessageHandler::SendRoundRobin()
+  {
+    m_queueStats.numTicks++;
+
+    // send non-routing messages first priority
+    auto &non_routing_mq = outboundMessageQueues[zeroID];
+    while(not non_routing_mq.empty())
+    {
+      const MessageQueueEntry &entry = non_routing_mq.top();
+      Send(entry.router, entry.message);
+      non_routing_mq.pop();
+    }
+
+    size_t empty_count = 0;
+    size_t num_queues  = roundRobinOrder.size();
+
+    if(removedSomePaths)
+    {
+      for(size_t i = 0; i < num_queues; i++)
+      {
+        PathID_t pathid = std::move(roundRobinOrder.front());
+        roundRobinOrder.pop();
+
+        if(outboundMessageQueues.find(pathid) != outboundMessageQueues.end())
+        {
+          roundRobinOrder.push(std::move(pathid));
+        }
+      }
+    }
+
+    num_queues        = roundRobinOrder.size();
+    size_t sent_count = 0;
+    if(num_queues == 0)  // if no queues, return
+    {
+      return;
+    }
+
+    while(sent_count
+          < MAX_OUTBOUND_MESSAGES_PER_TICK)  // TODO: better stop condition
+    {
+      PathID_t pathid = std::move(roundRobinOrder.front());
+      roundRobinOrder.pop();
+
+      auto &message_queue = outboundMessageQueues[pathid];
+      if(message_queue.size() > 0)
+      {
+        const MessageQueueEntry &entry = message_queue.top();
+
+        Send(entry.router, entry.message);
+        message_queue.pop();
+
+        empty_count = 0;
+        sent_count++;
+      }
+      else
+      {
+        empty_count++;
+      }
+
+      roundRobinOrder.push(std::move(pathid));
+
+      // if num_queues empty queues in a row, all queues empty.
+      if(empty_count == num_queues)
+      {
+        break;
+      }
+    }
+
+    m_queueStats.perTickMax =
+        std::max((uint32_t)sent_count, m_queueStats.perTickMax);
+  }
+
+  void
+  OutboundMessageHandler::FinalizeSessionRequest(const RouterID &router,
+                                                 SendStatus status)
   {
     MessageQueue movedMessages;
     {
       util::Lock l(&_mutex);
-      auto itr = outboundMessageQueue.find(router);
+      auto itr = pendingSessionMessageQueues.find(router);
 
-      if(itr == outboundMessageQueue.end())
+      if(itr == pendingSessionMessageQueues.end())
       {
         return;
       }
 
-      movedMessages.splice(movedMessages.begin(), itr->second);
+      movedMessages.swap(itr->second);
 
-      outboundMessageQueue.erase(itr);
+      pendingSessionMessageQueues.erase(itr);
     }
 
-    for(const auto &msg : movedMessages)
+    while(!movedMessages.empty())
     {
+      const MessageQueueEntry &entry = movedMessages.top();
+
       if(status == SendStatus::Success)
       {
-        Send(router, msg);
+        Send(entry.router, entry.message);
       }
       else
       {
-        DoCallback(msg.second, status);
+        DoCallback(entry.message.second, status);
       }
+      movedMessages.pop();
     }
   }
 

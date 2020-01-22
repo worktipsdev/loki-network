@@ -7,11 +7,12 @@
 #include <routing/path_confirm_message.hpp>
 #include <util/bencode.hpp>
 #include <util/buffer.hpp>
-#include <util/logger.hpp>
-#include <util/logic.hpp>
-#include <util/memfn.hpp>
+#include <util/logging/logger.hpp>
+#include <util/meta/memfn.hpp>
+#include <util/thread/logic.hpp>
 
 #include <functional>
+#include <utility>
 
 namespace llarp
 {
@@ -25,10 +26,12 @@ namespace llarp
     HopHandler_ptr path;
     AbstractRouter* router;
 
-    LRSM_AsyncHandler(const std::array< EncryptedFrame, 8 >& _frames,
-                      uint64_t _status, HopHandler_ptr _path,
-                      AbstractRouter* _router)
-        : frames(_frames), status(_status), path(_path), router(_router)
+    LRSM_AsyncHandler(std::array< EncryptedFrame, 8 > _frames, uint64_t _status,
+                      HopHandler_ptr _path, AbstractRouter* _router)
+        : frames(std::move(_frames))
+        , status(_status)
+        , path(std::move(_path))
+        , router(_router)
     {
     }
 
@@ -57,7 +60,7 @@ namespace llarp
     {
       return BEncodeReadArray(frames, buf);
     }
-    else if(key == "p")
+    if(key == "p")
     {
       if(!BEncodeMaybeReadDictEntry("p", pathid, read, key, buf))
       {
@@ -73,8 +76,8 @@ namespace llarp
     }
     else if(key == "v")
     {
-      if(!BEncodeMaybeReadVersion("v", version, LLARP_PROTO_VERSION, read, key,
-                                  buf))
+      if(!BEncodeMaybeVerifyVersion("v", version, LLARP_PROTO_VERSION, read,
+                                    key, buf))
       {
         return false;
       }
@@ -87,6 +90,7 @@ namespace llarp
   LR_StatusMessage::Clear()
   {
     std::for_each(frames.begin(), frames.end(), [](auto& f) { f.Clear(); });
+    version = 0;
   }
 
   bool
@@ -107,7 +111,7 @@ namespace llarp
     if(!BEncodeWriteDictInt("s", status, buf))
       return false;
     // version
-    if(!bencode_write_version_entry(buf))
+    if(!bencode_write_uint64_entry(buf, "v", 1, LLARP_PROTO_VERSION))
       return false;
 
     return bencode_end(buf);
@@ -172,7 +176,7 @@ namespace llarp
   }
 
   bool
-  LR_StatusMessage::AddFrame(const SharedSecret& pathKey, uint64_t status)
+  LR_StatusMessage::AddFrame(const SharedSecret& pathKey, uint64_t newStatus)
   {
     frames[7] = frames[6];
     frames[6] = frames[5];
@@ -188,7 +192,7 @@ namespace llarp
 
     LR_StatusRecord record;
 
-    record.status  = status;
+    record.status  = newStatus;
     record.version = LLARP_PROTO_VERSION;
 
     llarp_buffer_t buf(frame.data(), frame.size());
@@ -218,7 +222,7 @@ namespace llarp
                                      std::shared_ptr< LR_StatusMessage > msg)
   {
     auto func = std::bind(&LR_StatusMessage::SendMessage, router, nextHop, msg);
-    router->pathContext().logic()->queue_func(func);
+    LogicCall(router->logic(), func);
   }
 
   void
@@ -244,7 +248,8 @@ namespace llarp
   LR_StatusRecord::BEncode(llarp_buffer_t* buf) const
   {
     return bencode_start_dict(buf) && BEncodeWriteDictInt("s", status, buf)
-        && bencode_write_version_entry(buf) && bencode_end(buf);
+        && bencode_write_uint64_entry(buf, "v", 1, LLARP_PROTO_VERSION)
+        && bencode_end(buf);
   }
 
   bool
@@ -257,8 +262,8 @@ namespace llarp
 
     if(!BEncodeMaybeReadDictInt("s", status, read, *key, buffer))
       return false;
-    if(!BEncodeMaybeReadVersion("v", version, LLARP_PROTO_VERSION, read, *key,
-                                buffer))
+    if(!BEncodeMaybeVerifyVersion("v", version, LLARP_PROTO_VERSION, read, *key,
+                                  buffer))
       return false;
 
     return read;

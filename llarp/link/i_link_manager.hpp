@@ -2,8 +2,8 @@
 #define LLARP_I_LINK_MANAGER_HPP
 
 #include <link/server.hpp>
+#include <util/thread/logic.hpp>
 #include <util/types.hpp>
-#include <util/logic.hpp>
 
 #include <functional>
 
@@ -17,11 +17,6 @@ namespace llarp
   struct ILinkSession;
   struct IOutboundSessionMaker;
   struct RouterID;
-
-  namespace util
-  {
-    struct StatusObject;
-  }  // namespace util
 
   struct ILinkManager
   {
@@ -47,7 +42,8 @@ namespace llarp
     AddLink(LinkLayer_ptr link, bool inbound = false) = 0;
 
     virtual bool
-    StartLinks(Logic_ptr logic) = 0;
+    StartLinks(Logic_ptr logic,
+               std::shared_ptr< thread::ThreadPool > worker) = 0;
 
     virtual void
     Stop() = 0;
@@ -70,6 +66,9 @@ namespace llarp
 
     virtual size_t
     NumberOfConnectedClients() const = 0;
+
+    virtual size_t
+    NumberOfPendingConnections() const = 0;
 
     virtual bool
     GetRandomConnectedRouter(RouterContact &router) const = 0;

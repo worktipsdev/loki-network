@@ -3,32 +3,36 @@
 
 #include <router/abstractrouter.hpp>
 
+#include <bootstrap.hpp>
+#include <config/key_manager.hpp>
 #include <constants/link_layer.hpp>
 #include <crypto/types.hpp>
 #include <ev/ev.h>
 #include <exit/context.hpp>
 #include <handlers/tun.hpp>
+#include <link/factory.hpp>
+#include <link/link_manager.hpp>
 #include <link/server.hpp>
 #include <messages/link_message_parser.hpp>
 #include <nodedb.hpp>
 #include <path/path_context.hpp>
 #include <profiling.hpp>
 #include <router_contact.hpp>
+#include <router/outbound_message_handler.hpp>
+#include <router/outbound_session_maker.hpp>
+#include <router/rc_lookup_handler.hpp>
 #include <routing/handler.hpp>
 #include <routing/message_parser.hpp>
 #include <rpc/rpc.hpp>
 #include <service/context.hpp>
 #include <util/buffer.hpp>
 #include <util/fs.hpp>
-#include <util/logic.hpp>
 #include <util/mem.hpp>
 #include <util/status.hpp>
 #include <util/str.hpp>
-#include <util/threadpool.h>
-#include <router/outbound_message_handler.hpp>
-#include <router/outbound_session_maker.hpp>
-#include <link/link_manager.hpp>
-#include <router/rc_lookup_handler.hpp>
+#include <util/thread/logic.hpp>
+#include <util/thread/threadpool.h>
+#include <util/time.hpp>
 
 #include <functional>
 #include <list>
@@ -43,21 +47,11 @@ namespace llarp
   struct Config;
 }  // namespace llarp
 
-bool
-llarp_findOrCreateEncryption(const fs::path &fpath,
-                             llarp::SecretKey &encryption);
-
-bool
-llarp_findOrCreateIdentity(const fs::path &path, llarp::SecretKey &secretkey);
-
-bool
-llarp_loadServiceNodeIdentityKey(const fs::path &fpath,
-                                 llarp::SecretKey &secretkey);
-
 namespace llarp
 {
   struct Router final : public AbstractRouter
   {
+    llarp_time_t _lastPump = 0;
     bool ready;
     // transient iwp encryption key
     fs::path transport_keyfile = "transport.key";
@@ -134,6 +128,12 @@ namespace llarp
       return _exitContext;
     }
 
+    std::shared_ptr< KeyManager >
+    keyManager() const override
+    {
+      return m_keyManager;
+    }
+
     const SecretKey &
     identity() const override
     {
@@ -175,6 +175,8 @@ namespace llarp
     struct sockaddr_in ip4addr;
     AddressInfo addrInfo;
 
+    LinkFactory::LinkType _defaultLinkType;
+
     llarp_ev_loop_ptr _netloop;
     std::shared_ptr< llarp::thread::ThreadPool > cryptoworker;
     std::shared_ptr< Logic > _logic;
@@ -194,13 +196,6 @@ namespace llarp
     Sign(Signature &sig, const llarp_buffer_t &buf) const override;
 
     uint16_t m_OutboundPort = 0;
-
-    /// always maintain this many connections to other routers
-    size_t minConnectedRouters = 2;
-    /// hard upperbound limit on the number of router to router connections
-    size_t maxConnectedRouters = 2000;
-
-    size_t minRequiredRouters = 4;
     /// how often do we resign our RC? milliseconds.
     // TODO: make configurable
     llarp_time_t rcRegenInterval = 60 * 60 * 1000;
@@ -227,13 +222,22 @@ namespace llarp
       return _hiddenServiceContext;
     }
 
+    llarp_time_t _lastTick = 0;
+
+    bool
+    LooksAlive() const override
+    {
+      const llarp_time_t now = Now();
+      return now <= _lastTick || (now - _lastTick) <= llarp_time_t{30000};
+    }
+
     using NetConfig_t = std::unordered_multimap< std::string, std::string >;
 
     /// default network config for default network interface
     NetConfig_t netConfig;
 
     /// bootstrap RCs
-    std::set< RouterContact > bootstrapRCList;
+    BootstrapList bootstrapRCList;
 
     bool
     ExitEnabled() const
@@ -270,6 +274,11 @@ namespace llarp
     LinkManager _linkManager;
     RCLookupHandler _rcLookupHandler;
 
+    using Clock_t     = std::chrono::steady_clock;
+    using TimePoint_t = Clock_t::time_point;
+
+    TimePoint_t m_NextExploreAt;
+
     IOutboundMessageHandler &
     outboundMessageHandler() override
     {
@@ -297,7 +306,7 @@ namespace llarp
     Router(std::shared_ptr< llarp::thread::ThreadPool > worker,
            llarp_ev_loop_ptr __netloop, std::shared_ptr< Logic > logic);
 
-    ~Router();
+    ~Router() override;
 
     bool
     HandleRecvLinkMessageBuffer(ILinkSession *from,
@@ -314,9 +323,12 @@ namespace llarp
     bool
     InitServiceNode();
 
+    bool
+    IsRunning() const override;
+
     /// return true if we are running in service node mode
     bool
-    IsServiceNode() const;
+    IsServiceNode() const override;
 
     void
     Close();
@@ -331,7 +343,10 @@ namespace llarp
     Configure(Config *conf, llarp_nodedb *nodedb = nullptr) override;
 
     bool
-    Run(struct llarp_nodedb *nodedb) override;
+    StartJsonRpc() override;
+
+    bool
+    Run() override;
 
     /// stop running the router logic gracefully
     void
@@ -414,11 +429,10 @@ namespace llarp
     void
     Tick();
 
-    /// get time from event loop
     llarp_time_t
     Now() const override
     {
-      return llarp_ev_loop_time_now_ms(_netloop);
+      return llarp::time_now_ms();
     }
 
     /// schedule ticker to call i ms from now
@@ -457,8 +471,14 @@ namespace llarp
     bool
     HasSessionTo(const RouterID &remote) const override;
 
-    static void
-    handle_router_ticker(void *user, uint64_t orig, uint64_t left);
+    void
+    handle_router_ticker();
+
+    void
+    AfterStopLinks();
+
+    void
+    AfterStopIssued();
 
    private:
     std::atomic< bool > _stopping;
@@ -467,6 +487,8 @@ namespace llarp
     bool m_isServiceNode = false;
 
     llarp_time_t m_LastStatsReport = 0;
+
+    std::shared_ptr< llarp::KeyManager > m_keyManager;
 
     bool
     ShouldReportStats(llarp_time_t now) const;

@@ -98,14 +98,14 @@ metric-tank-host=52.80.56.123:2003
                 UnorderedElementsAre(kv("ifname", "cluster-1"),
                                      kv("ifaddr", "10.101.0.1/16")));
   }
-  ASSERT_FALSE(config.metrics.disableMetricLogs);
-  ASSERT_FALSE(config.metrics.disableMetrics);
+  ASSERT_TRUE(config.metrics.disableMetricLogs);
+  ASSERT_TRUE(config.metrics.disableMetrics);
 
   {
-    using kv = IwpConfig::Servers::value_type;
+    using kv = LinksConfig::Links::value_type;
 
-    ASSERT_THAT(config.iwp_links.servers(),
-                UnorderedElementsAre(kv("eth0", AF_INET, 5501)));
+    ASSERT_THAT(config.links.inboundLinks(),
+                UnorderedElementsAre(kv("eth0", AF_INET, 5501, {})));
   }
 
   ASSERT_THAT(config.bootstrap.routers,

@@ -4,8 +4,9 @@
 #include <crypto/encrypted.hpp>
 #include <crypto/types.hpp>
 #include <util/buffer.hpp>
+#include <utility>
 #include <util/mem.h>
-#include <util/threadpool.h>
+#include <util/thread/threadpool.h>
 
 namespace llarp
 {
@@ -57,30 +58,25 @@ namespace llarp
     using User_ptr       = std::shared_ptr< User >;
     using DecryptHandler = std::function< void(llarp_buffer_t*, User_ptr) >;
 
-    static void
-    Decrypt(void* user)
+    void
+    Decrypt(User_ptr user)
     {
-      AsyncFrameDecrypter< User >* ctx =
-          static_cast< AsyncFrameDecrypter< User >* >(user);
-
-      if(ctx->target.DecryptInPlace(ctx->seckey))
+      if(target.DecryptInPlace(seckey))
       {
-        auto buf = ctx->target.Buffer();
+        auto buf = target.Buffer();
         buf->cur = buf->base + EncryptedFrameOverheadSize;
-        ctx->result(buf, ctx->user);
+        result(buf, user);
       }
       else
-        ctx->result(nullptr, ctx->user);
-      ctx->user = nullptr;
+        result(nullptr, user);
     }
 
     AsyncFrameDecrypter(const SecretKey& secretkey, DecryptHandler h)
-        : result(h), seckey(secretkey)
+        : result(std::move(h)), seckey(secretkey)
     {
     }
 
     DecryptHandler result;
-    User_ptr user;
     const SecretKey& seckey;
     EncryptedFrame target;
 
@@ -89,8 +85,8 @@ namespace llarp
                  const EncryptedFrame& frame, User_ptr u)
     {
       target = frame;
-      user   = u;
-      worker->addJob(std::bind(&Decrypt, this));
+      worker->addJob(
+          std::bind(&AsyncFrameDecrypter< User >::Decrypt, this, std::move(u)));
     }
   };
 }  // namespace llarp

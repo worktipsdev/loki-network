@@ -31,16 +31,11 @@ namespace llarp
     };
 
     InboundMessageParser::InboundMessageParser()
-        : firstKey(false)
-        , ourKey('\0')
-        , msg(nullptr)
-        , m_Holder(std::make_unique< MessageHolder >())
+        : m_Holder(std::make_unique< MessageHolder >())
     {
     }
 
-    InboundMessageParser::~InboundMessageParser()
-    {
-    }
+    InboundMessageParser::~InboundMessageParser() = default;
 
     bool
     InboundMessageParser::operator()(llarp_buffer_t* buffer,
@@ -105,6 +100,8 @@ namespace llarp
           default:
             llarp::LogError("invalid routing message id: ", *strbuf.cur);
         }
+        if(msg)
+          msg->version = version;
         firstKey = false;
         return msg != nullptr;
       }
@@ -123,6 +120,11 @@ namespace llarp
       firstKey    = true;
       ManagedBuffer copiedBuf(buf);
       auto& copy = copiedBuf.underlying;
+      uint64_t v = 0;
+      if(BEncodeSeekDictVersion(v, &copy, 'V'))
+      {
+        version = v;
+      }
       if(bencode_read_dict(*this, &copy))
       {
         msg->from = from;
@@ -139,7 +141,8 @@ namespace llarp
       }
       if(msg)
         msg->Clear();
-      msg = nullptr;
+      msg     = nullptr;
+      version = 0;
       return result;
     }
   }  // namespace routing

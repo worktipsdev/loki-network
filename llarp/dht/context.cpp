@@ -17,26 +17,23 @@
 #include <path/path_context.hpp>
 #include <router/abstractrouter.hpp>
 #include <routing/dht_message.hpp>
-#include <util/logic.hpp>
+#include <util/thread/logic.hpp>
 #include <nodedb.hpp>
-
+#include <profiling.hpp>
+#include <router/i_rc_lookup_handler.hpp>
 #include <vector>
 
 namespace llarp
 {
   namespace dht
   {
-    AbstractContext::~AbstractContext()
-    {
-    }
+    AbstractContext::~AbstractContext() = default;
 
     struct Context final : public AbstractContext
     {
       Context();
 
-      ~Context()
-      {
-      }
+      ~Context() override = default;
 
       util::StatusObject
       ExtractStatus() const override;
@@ -44,7 +41,7 @@ namespace llarp
       void
       StoreRC(const RouterContact rc) const override
       {
-        GetRouter()->nodedb()->InsertAsync(rc);
+        GetRouter()->rcLookupHandler().CheckRC(rc);
       }
 
       /// on behalf of whoasked request introset for target from dht router with
@@ -157,17 +154,17 @@ namespace llarp
       GetIntroSetByServiceAddress(
           const llarp::service::Address& addr) const override;
 
-      static void
-      handle_cleaner_timer(void* user, uint64_t orig, uint64_t left);
+      void
+      handle_cleaner_timer(uint64_t interval);
 
-      static void
-      handle_explore_timer(void* user, uint64_t orig, uint64_t left);
+      void
+      handle_explore_timer(uint64_t interval);
 
       /// explore dht for new routers
       void
       Explore(size_t N = 3);
 
-      llarp::AbstractRouter* router;
+      llarp::AbstractRouter* router{nullptr};
       // for router contacts
       std::unique_ptr< Bucket< RCNode > > _nodes;
 
@@ -180,7 +177,7 @@ namespace llarp
         return _services.get();
       }
 
-      bool allowTransit;
+      bool allowTransit{false};
 
       bool&
       AllowTransit() override
@@ -203,14 +200,14 @@ namespace llarp
       PutRCNodeAsync(const RCNode& val) override
       {
         auto func = std::bind(&Bucket< RCNode >::PutNode, Nodes(), val);
-        router->logic()->queue_func(func);
+        LogicCall(router->logic(), func);
       }
 
       void
       DelRCNodeAsync(const Key_t& val) override
       {
         auto func = std::bind(&Bucket< RCNode >::DelNode, Nodes(), val);
-        router->logic()->queue_func(func);
+        LogicCall(router->logic(), func);
       }
 
       const Key_t&
@@ -308,7 +305,7 @@ namespace llarp
       Key_t ourKey;
     };
 
-    Context::Context() : router(nullptr), allowTransit(false)
+    Context::Context()
     {
       randombytes((byte_t*)&ids, sizeof(uint64_t));
     }
@@ -342,34 +339,28 @@ namespace llarp
     }
 
     void
-    Context::handle_explore_timer(void* u, uint64_t orig, uint64_t left)
+    Context::handle_explore_timer(uint64_t interval)
     {
-      if(left)
-        return;
-      Context* ctx = static_cast< Context* >(u);
-      const auto num =
-          std::min(ctx->router->NumberOfConnectedRouters(), size_t(4));
+      const auto num = std::min(router->NumberOfConnectedRouters(), size_t(4));
       if(num)
-        ctx->Explore(num);
-      ctx->router->logic()->call_later({orig, ctx, &handle_explore_timer});
+        Explore(num);
+      router->logic()->call_later(
+          interval,
+          std::bind(&llarp::dht::Context::handle_explore_timer, this,
+                    interval));
     }
 
     void
-    Context::handle_cleaner_timer(void* u,
-                                  __attribute__((unused)) uint64_t orig,
-                                  uint64_t left)
+    Context::handle_cleaner_timer(__attribute__((unused)) uint64_t interval)
     {
-      if(left)
-        return;
-      Context* ctx = static_cast< Context* >(u);
       // clean up transactions
-      ctx->CleanupTX();
+      CleanupTX();
 
-      if(ctx->_services)
+      if(_services)
       {
         // expire intro sets
-        auto now    = ctx->Now();
-        auto& nodes = ctx->_services->nodes;
+        auto now    = Now();
+        auto& nodes = _services->nodes;
         auto itr    = nodes.begin();
         while(itr != nodes.end())
         {
@@ -382,7 +373,7 @@ namespace llarp
             ++itr;
         }
       }
-      ctx->ScheduleCleanupTimer();
+      ScheduleCleanupTimer();
     }
 
     std::set< service::IntroSet >
@@ -532,7 +523,9 @@ namespace llarp
       // start exploring
 
       r->logic()->call_later(
-          {exploreInterval, this, &llarp::dht::Context::handle_explore_timer});
+          exploreInterval,
+          std::bind(&llarp::dht::Context::handle_explore_timer, this,
+                    exploreInterval));
       // start cleanup timer
       ScheduleCleanupTimer();
     }
@@ -540,7 +533,9 @@ namespace llarp
     void
     Context::ScheduleCleanupTimer()
     {
-      router->logic()->call_later({1000, this, &handle_cleaner_timer});
+      router->logic()->call_later(
+          1000,
+          std::bind(&llarp::dht::Context::handle_cleaner_timer, this, 1000));
     }
 
     void
@@ -603,7 +598,7 @@ namespace llarp
       TXOwner peer(askpeer, ++ids);
       _pendingIntrosetLookups.NewTX(
           peer, asker, addr,
-          new ServiceAddressLookup(asker, addr, this, R, handler));
+          new ServiceAddressLookup(asker, addr, this, R, handler), (R * 2000));
     }
 
     void
@@ -616,7 +611,7 @@ namespace llarp
       TXOwner peer(askpeer, ++ids);
       _pendingIntrosetLookups.NewTX(
           peer, asker, addr,
-          new ServiceAddressLookup(asker, addr, this, 0, handler));
+          new ServiceAddressLookup(asker, addr, this, 0, handler), 1000);
     }
 
     void
@@ -677,7 +672,11 @@ namespace llarp
       }
       for(const auto& f : foundRouters)
       {
-        closer.emplace_back(f.as_array());
+        const RouterID r = f.as_array();
+        // discard shit routers
+        if(router->routerProfiling().IsBadForConnect(r))
+          continue;
+        closer.emplace_back(r);
       }
       llarp::LogDebug("Gave ", closer.size(), " routers for exploration");
       reply.emplace_back(new GotRouterMessage(txid, closer, false));
