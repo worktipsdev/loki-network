@@ -1,1 +1,1 @@
-add_executable(lokinet AppDelegate.swift ViewController.swift)
+add_executable(worktipsnet AppDelegate.swift ViewController.swift)

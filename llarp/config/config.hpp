@@ -22,7 +22,7 @@ namespace llarp
   Type
   fromEnv(const Type& val, string_view envNameSuffix)
   {
-    std::string envName = absl::StrCat("LOKINET_", envNameSuffix);
+    std::string envName = absl::StrCat("WORKTIPSNET_", envNameSuffix);
     char* ptr           = std::getenv(envName.c_str());
     if(ptr)
     {
@@ -36,7 +36,7 @@ namespace llarp
   inline int
   fromEnv< int >(const int& val, string_view envNameSuffix)
   {
-    std::string envName = absl::StrCat("LOKINET_", envNameSuffix);
+    std::string envName = absl::StrCat("WORKTIPSNET_", envNameSuffix);
     const char* ptr     = std::getenv(envName.c_str());
     if(ptr)
     {
@@ -50,7 +50,7 @@ namespace llarp
   inline uint16_t
   fromEnv< uint16_t >(const uint16_t& val, string_view envNameSuffix)
   {
-    std::string envName = absl::StrCat("LOKINET_", envNameSuffix);
+    std::string envName = absl::StrCat("WORKTIPSNET_", envNameSuffix);
     const char* ptr     = std::getenv(envName.c_str());
     if(ptr)
     {
@@ -64,7 +64,7 @@ namespace llarp
   inline size_t
   fromEnv< size_t >(const size_t& val, string_view envNameSuffix)
   {
-    std::string envName = absl::StrCat("LOKINET_", envNameSuffix);
+    std::string envName = absl::StrCat("WORKTIPSNET_", envNameSuffix);
     const char* ptr     = std::getenv(envName.c_str());
     if(ptr)
     {
@@ -79,7 +79,7 @@ namespace llarp
   fromEnv< absl::optional< bool > >(const absl::optional< bool >& val,
                                     string_view envNameSuffix)
   {
-    std::string envName = absl::StrCat("LOKINET_", envNameSuffix);
+    std::string envName = absl::StrCat("WORKTIPSNET_", envNameSuffix);
     const char* ptr     = std::getenv(envName.c_str());
     if(ptr)
     {
@@ -272,14 +272,14 @@ namespace llarp
     fromSection(string_view key, string_view val);
   };
 
-  struct LokidConfig
+  struct WorktipsdConfig
   {
     bool usingSNSeed         = false;
     bool whitelistRouters    = false;
     fs::path ident_keyfile   = "identity.key";
-    std::string lokidRPCAddr = "127.0.0.1:22023";
-    std::string lokidRPCUser;
-    std::string lokidRPCPassword;
+    std::string worktipsdRPCAddr = "127.0.0.1:22023";
+    std::string worktipsdRPCUser;
+    std::string worktipsdRPCPassword;
 
     void
     fromSection(string_view key, string_view val);
@@ -318,7 +318,7 @@ namespace llarp
     SystemConfig system;
     MetricsConfig metrics;
     ApiConfig api;
-    LokidConfig lokid;
+    WorktipsdConfig worktipsd;
     BootstrapConfig bootstrap;
     LoggingConfig logging;
 

@@ -1,8 +1,8 @@
 #!/bin/sh
-echo "Running preinstall" > /tmp/lokinet_preinstall.log
-if [ ! -d "$HOME/.lokinet" ]
+echo "Running preinstall" > /tmp/worktipsnet_preinstall.log
+if [ ! -d "$HOME/.worktipsnet" ]
 then
-  mkdir $HOME/.lokinet >> /tmp/lokinet_preinstall.log
+  mkdir $HOME/.worktipsnet >> /tmp/worktipsnet_preinstall.log
 fi
-find $HOME/.lokinet >> /tmp/lokinet_preinstall.log
+find $HOME/.worktipsnet >> /tmp/worktipsnet_preinstall.log
 exit 0 # all good

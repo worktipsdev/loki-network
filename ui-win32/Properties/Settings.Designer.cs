@@ -8,7 +8,7 @@
 // </auto-generated>
 //------------------------------------------------------------------------------
 
-namespace network.loki.lokinet.win32.ui.Properties {
+namespace network.worktips.worktipsnet.win32.ui.Properties {
     
     
     [global::System.Runtime.CompilerServices.CompilerGeneratedAttribute()]

@@ -1,8 +1,8 @@
 //
 //  AppDelegate.swift
-//  lokinet
+//  worktipsnet
 //
-//  Copyright © 2019 Loki. All rights reserved.
+//  Copyright © 2019 Worktips. All rights reserved.
 //
 
 import Cocoa
@@ -12,7 +12,7 @@ let LOG_WINDOW_CONTROLLER: NSWindowController = NSWindowController(window: nil)
 @NSApplicationMain
 class AppDelegate: NSObject, NSApplicationDelegate {
 
-    var lokinet: LokinetRunner? = nil
+    var worktipsnet: WorktipsnetRunner? = nil
     var appender: Appendable? = nil
 
     var statusBarItem: NSStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -26,15 +26,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         guard let statusButton = statusBarItem.button else { return }
-        statusButton.title = "LokiNet"
+        statusButton.title = "WorktipsNet"
         let statusMenu: NSMenu = NSMenu()
         statusMenu.autoenablesItems = false
-        statusMenu.addItem(withTitle: "LokiNet", action: nil, keyEquivalent: "")
+        statusMenu.addItem(withTitle: "WorktipsNet", action: nil, keyEquivalent: "")
 
         let runItem: NSMenuItem = {
             let item = NSMenuItem(
                 title: "Run",
-                action: #selector(runLokinet),
+                action: #selector(runWorktipsnet),
                 keyEquivalent: "r"
             )
             item.target = self
@@ -45,7 +45,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let stopItem: NSMenuItem = {
             let item = NSMenuItem(
                 title: "Stop",
-                action: #selector(stopLokinet),
+                action: #selector(stopWorktipsnet),
                 keyEquivalent: "s"
 
             )
@@ -90,14 +90,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
-        lokinet?.stop()
+        worktipsnet?.stop()
     }
 }
 
 extension AppDelegate {
     @objc
     func showWindow(sender: NSMenuItem) {
-        if let vc = WindowsManager.getVC(withIdentifier: "LokinetLogController", ofType: LokinetLogController.self) {
+        if let vc = WindowsManager.getVC(withIdentifier: "WorktipsnetLogController", ofType: WorktipsnetLogController.self) {
             appender = vc.log
             let window: NSWindow = {
                 let w = NSWindow(contentViewController: vc)
@@ -111,7 +111,7 @@ extension AppDelegate {
                 return w
             }()
 
-            lokinet?.logAppender = vc.log
+            worktipsnet?.logAppender = vc.log
 
             if LOG_WINDOW_CONTROLLER.window == nil {
                 LOG_WINDOW_CONTROLLER.window = window
@@ -122,11 +122,11 @@ extension AppDelegate {
     }
 
     @objc
-    func runLokinet(sender: NSMenuItem) {
-        if lokinet == nil {
-            lokinet = LokinetRunner(interface: Preferences.interfaceName, path: Preferences.lokinetPath)
-            lokinet?.logAppender = appender
-            lokinet?.start()
+    func runWorktipsnet(sender: NSMenuItem) {
+        if worktipsnet == nil {
+            worktipsnet = WorktipsnetRunner(interface: Preferences.interfaceName, path: Preferences.worktipsnetPath)
+            worktipsnet?.logAppender = appender
+            worktipsnet?.start()
         }
 
         sender.isEnabled = false;
@@ -137,9 +137,9 @@ extension AppDelegate {
     }
 
     @objc
-    func stopLokinet(_ sender: NSMenuItem) {
-        lokinet?.stop()
-        lokinet = nil
+    func stopWorktipsnet(_ sender: NSMenuItem) {
+        worktipsnet?.stop()
+        worktipsnet = nil
 
         sender.isEnabled = false;
 

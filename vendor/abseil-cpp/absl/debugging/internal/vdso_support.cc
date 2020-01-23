@@ -185,7 +185,7 @@ int GetCPU() {
 static class VDSOInitHelper {
  public:
   VDSOInitHelper() {
-#ifndef LOKINET_SHADOW
+#ifndef WORKTIPSNET_SHADOW
     VDSOSupport::Init();
 #endif
   }

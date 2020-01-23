@@ -1,4 +1,4 @@
-﻿namespace network.loki.lokinet.win32.ui
+﻿namespace network.worktips.worktipsnet.win32.ui
 {
     partial class VisualSettings
     {

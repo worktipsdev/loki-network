@@ -1,8 +1,8 @@
 //
 //  WindowsManager.swift
-//  lokinet
+//  worktipsnet
 //
-//  Copyright © 2019 Loki. All rights reserved.
+//  Copyright © 2019 Worktips. All rights reserved.
 //
 
 import AppKit

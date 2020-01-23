@@ -1,4 +1,4 @@
-package network.loki.lokinet;
+package network.worktips.worktipsnet;
 
 import android.util.Log;
 import android.content.BroadcastReceiver;
@@ -9,7 +9,7 @@ import android.net.NetworkInfo;
 
 public class NetworkStateChangeReceiver extends BroadcastReceiver {
 
-    private static final String TAG = "lokinet";
+    private static final String TAG = "worktipsnet";
 
 	//api level 1
     @Override

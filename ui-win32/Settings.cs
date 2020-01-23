@@ -1,4 +1,4 @@
-﻿namespace network.loki.lokinet.win32.ui.Properties {
+﻿namespace network.worktips.worktipsnet.win32.ui.Properties {
     
     
     // This class allows you to handle specific events on the settings class:
