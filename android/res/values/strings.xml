@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">worktipsnet</string>
+    <string name="action_start">Start</string>
+    <string name="action_stop">Stop</string>
+    <string name="already_stopped">Already stopped</string>
+    <string name="loaded">worktipsnet loaded</string>
+    <string name="starting">worktipsnet is starting</string>
+    <string name="jniLibraryLoaded">worktipsnet: loaded JNI libraries</string>
+    <string name="startedOkay">worktipsnet started</string>
+    <string name="startFailed">worktipsnet start failed</string>
+    <string name="stopped">worktipsnet has stopped</string>
+    <string name="remaining">remaining</string>
+    <string name="title_activity_perms_asker_prompt">Prompt</string>
+    <string name="bootstrap_ok">got bootstrap node info</string>
+    <string name="bootstrap_fail">failed to bootstrap</string>
+    <string name="netdb_create_fail">failed to create netdb directory</string>
+    <string name="vpn_setup_fail">failed to set up vpn tunnel</string>
+</resources>

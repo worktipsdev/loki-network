@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<installer-gui-script minSpecVersion="1">
+  <title>Worktipsnet</title>
+  <organization>network.worktips</organization>
+  <domains enable_localSystem="true"/>
+  <options customize="never" require-scripts="true" rootVolumeOnly="true" />
+  <!-- Define documents displayed at various steps -->
+  <welcome    file="welcome.html"    mime-type="text/html" />
+  <license    file="license.html"    mime-type="text/html" />
+  <conclusion file="conclusion.html" mime-type="text/html" />
+  <!-- List all component packages -->
+  <pkg-ref id="network.worktips.worktipsnet"
+           version="0.5"
+           auth="root">worktipsnet.pkg</pkg-ref>
+  <!-- List them again here. They can now be organized
+       as a hierarchy if you want. -->
+  <choices-outline>
+    <line choice="network.worktips.worktipsnet"/>
+  </choices-outline>
+  <!-- Define each choice above -->
+  <choice
+      id="network.worktips.worktipsnet"
+      visible="false"
+      title="Worktipsnet"
+      description='Worktipsnet is a free, open source, private, decentralized, \"market based sybil resistant\" and IP based onion routing network'
+      start_selected="true">
+    <pkg-ref id="network.worktips.worktipsnet"/>
+  </choice>
+</installer-gui-script>

@@ -1,0 +1,29 @@
+#!/bin/sh
+echo "Running postinstall" > /tmp/worktipsnet_postinstall.log
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+rm $HOME/.worktipsnet/*.signed >> /tmp/worktipsnet_postinstall.log
+rm $HOME/.worktipsnet/*.key >> /tmp/worktipsnet_postinstall.log
+rm $HOME/.worktipsnet/*.private >> /tmp/worktipsnet_postinstall.log
+rm -fr $HOME/.worktipsnet/netdb >> /tmp/worktipsnet_postinstall.log
+
+/usr/local/bin/worktipsnet -g >> /tmp/worktipsnet_postinstall.log
+
+url="https://seed.worktipsnet.org/bootstrap.signed"
+echo "downloading $url" >> /tmp/worktipsnet_postinstall.log
+echo "to $HOME/.worktipsnet/bootstrap.signed" >> /tmp/worktipsnet_postinstall.log
+
+# use temp file to not overrwrite existing bootstrap file on fail
+tmp=/tmp/bootstrap.tmp
+
+# MacOS does not have wget without homebrew but does have curl
+# Rick also had indicated most BSDs have curl too
+curl "$url" > "$tmp" && \
+    (mv "$tmp" "$HOME/.worktipsnet/bootstrap.signed" && echo "${GREEN}worktipsnet successfully bootstrapped${NC}" >> /tmp/worktipsnet_postinstall.log) \
+        || echo "${RED}failed to download bootstrap from $url${NC}" >> /tmp/worktipsnet_postinstall.log
+rm -f "$tmp"
+
+exit 0 # all good
